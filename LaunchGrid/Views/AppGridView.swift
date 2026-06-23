@@ -2,28 +2,32 @@ import SwiftUI
 
 struct AppGridView: View {
     let apps: [AppItem]
+    let layout: LaunchpadLayout
     let iconCache: IconCache
+    let canLaunchApps: Bool
     let onLaunch: (AppItem) -> Void
 
-    private let columns = [
-        GridItem(.adaptive(minimum: 112, maximum: 136), spacing: 26, alignment: .top)
-    ]
-
     var body: some View {
-        ScrollView {
-            LazyVGrid(columns: columns, alignment: .center, spacing: 30) {
-                ForEach(apps) { app in
-                    AppIconView(
-                        app: app,
-                        image: iconCache.icon(for: app),
-                        action: {
-                            onLaunch(app)
-                        }
-                    )
-                }
+        LazyVGrid(columns: columns, alignment: .center, spacing: layout.rowSpacing) {
+            ForEach(apps) { app in
+                AppIconView(
+                    app: app,
+                    layout: layout,
+                    iconCache: iconCache,
+                    canLaunch: canLaunchApps,
+                    action: {
+                        onLaunch(app)
+                    }
+                )
             }
-            .padding(.vertical, 12)
         }
-        .scrollIndicators(.hidden)
+        .frame(width: layout.gridWidth, height: layout.gridHeight, alignment: .topLeading)
+    }
+
+    private var columns: [GridItem] {
+        Array(
+            repeating: GridItem(.fixed(layout.cellWidth), spacing: layout.columnSpacing, alignment: .top),
+            count: layout.columns
+        )
     }
 }

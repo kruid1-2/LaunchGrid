@@ -5,7 +5,7 @@ import PackageDescription
 let package = Package(
     name: "LaunchGrid",
     platforms: [
-        .macOS(.v13)
+        .macOS(.v26)
     ],
     products: [
         .executable(name: "LaunchGrid", targets: ["LaunchGrid"])
@@ -30,11 +30,16 @@ let package = Package(
                 "Services/AppLauncher.swift",
                 "Services/IconCache.swift",
                 "ViewModels/LauncherViewModel.swift",
+                "ViewModels/PagerViewModel.swift",
                 "Window/LauncherPanel.swift",
                 "Window/LauncherWindowController.swift",
+                "Window/PagingEventView.swift",
+                "Design/LaunchpadMetrics.swift",
                 "Views/LauncherView.swift",
                 "Views/AppGridView.swift",
+                "Views/AppPageView.swift",
                 "Views/AppIconView.swift",
+                "Views/PageIndicatorView.swift",
                 "Views/SearchBarView.swift"
             ]
         )

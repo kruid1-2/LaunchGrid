@@ -20,7 +20,7 @@ final class LauncherPanel: NSPanel {
         hasShadow = false
         hidesOnDeactivate = false
         isMovable = false
-        level = NSWindow.Level(NSWindow.Level.floating.rawValue + 2)
+        level = .statusBar
         collectionBehavior = [
             .canJoinAllSpaces,
             .fullScreenAuxiliary,

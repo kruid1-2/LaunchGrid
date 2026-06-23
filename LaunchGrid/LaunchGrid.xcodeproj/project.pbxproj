@@ -20,6 +20,11 @@
 		000000000000000000000111 /* AppGridView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000011 /* AppGridView.swift */; };
 		000000000000000000000112 /* AppIconView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000012 /* AppIconView.swift */; };
 		000000000000000000000113 /* SearchBarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000013 /* SearchBarView.swift */; };
+		000000000000000000000114 /* LaunchpadMetrics.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000015 /* LaunchpadMetrics.swift */; };
+		000000000000000000000115 /* PagerViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000016 /* PagerViewModel.swift */; };
+		000000000000000000000116 /* PagingEventView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000017 /* PagingEventView.swift */; };
+		000000000000000000000117 /* AppPageView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000018 /* AppPageView.swift */; };
+		000000000000000000000118 /* PageIndicatorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000019 /* PageIndicatorView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -37,6 +42,11 @@
 		000000000000000000000012 /* AppIconView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppIconView.swift; sourceTree = "<group>"; };
 		000000000000000000000013 /* SearchBarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SearchBarView.swift; sourceTree = "<group>"; };
 		000000000000000000000014 /* LaunchGrid.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = LaunchGrid.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		000000000000000000000015 /* LaunchpadMetrics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LaunchpadMetrics.swift; sourceTree = "<group>"; };
+		000000000000000000000016 /* PagerViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PagerViewModel.swift; sourceTree = "<group>"; };
+		000000000000000000000017 /* PagingEventView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PagingEventView.swift; sourceTree = "<group>"; };
+		000000000000000000000018 /* AppPageView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppPageView.swift; sourceTree = "<group>"; };
+		000000000000000000000019 /* PageIndicatorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PageIndicatorView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -60,6 +70,7 @@
 				000000000000000000000304 /* ViewModels */,
 				000000000000000000000305 /* Window */,
 				000000000000000000000306 /* Views */,
+				000000000000000000000308 /* Design */,
 				000000000000000000000307 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -86,6 +97,7 @@
 			isa = PBXGroup;
 			children = (
 				000000000000000000000007 /* LauncherViewModel.swift */,
+				000000000000000000000016 /* PagerViewModel.swift */,
 			);
 			path = ViewModels;
 			sourceTree = "<group>";
@@ -95,6 +107,7 @@
 			children = (
 				000000000000000000000008 /* LauncherPanel.swift */,
 				000000000000000000000009 /* LauncherWindowController.swift */,
+				000000000000000000000017 /* PagingEventView.swift */,
 			);
 			path = Window;
 			sourceTree = "<group>";
@@ -104,7 +117,9 @@
 			children = (
 				000000000000000000000010 /* LauncherView.swift */,
 				000000000000000000000011 /* AppGridView.swift */,
+				000000000000000000000018 /* AppPageView.swift */,
 				000000000000000000000012 /* AppIconView.swift */,
+				000000000000000000000019 /* PageIndicatorView.swift */,
 				000000000000000000000013 /* SearchBarView.swift */,
 			);
 			path = Views;
@@ -116,6 +131,14 @@
 				000000000000000000000014 /* LaunchGrid.app */,
 			);
 			name = Products;
+			sourceTree = "<group>";
+		};
+		000000000000000000000308 /* Design */ = {
+			isa = PBXGroup;
+			children = (
+				000000000000000000000015 /* LaunchpadMetrics.swift */,
+			);
+			path = Design;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -193,11 +216,16 @@
 				000000000000000000000105 /* AppLauncher.swift in Sources */,
 				000000000000000000000106 /* IconCache.swift in Sources */,
 				000000000000000000000107 /* LauncherViewModel.swift in Sources */,
+				000000000000000000000115 /* PagerViewModel.swift in Sources */,
 				000000000000000000000108 /* LauncherPanel.swift in Sources */,
 				000000000000000000000109 /* LauncherWindowController.swift in Sources */,
+				000000000000000000000116 /* PagingEventView.swift in Sources */,
+				000000000000000000000114 /* LaunchpadMetrics.swift in Sources */,
 				000000000000000000000110 /* LauncherView.swift in Sources */,
 				000000000000000000000111 /* AppGridView.swift in Sources */,
+				000000000000000000000117 /* AppPageView.swift in Sources */,
 				000000000000000000000112 /* AppIconView.swift in Sources */,
+				000000000000000000000118 /* PageIndicatorView.swift in Sources */,
 				000000000000000000000113 /* SearchBarView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -255,7 +283,7 @@
 				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
-				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				MACOSX_DEPLOYMENT_TARGET = 26.0;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = NO;
@@ -309,7 +337,7 @@
 				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
-				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				MACOSX_DEPLOYMENT_TARGET = 26.0;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = NO;
@@ -333,10 +361,10 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = LaunchGrid;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
-				INFOPLIST_KEY_LSMinimumSystemVersion = 13.0;
+				INFOPLIST_KEY_LSMinimumSystemVersion = 26.0;
 				INFOPLIST_KEY_NSPrincipalClass = NSApplication;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
-				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				MACOSX_DEPLOYMENT_TARGET = 26.0;
 				MARKETING_VERSION = 0.1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.launchgrid.app;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -362,10 +390,10 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = LaunchGrid;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
-				INFOPLIST_KEY_LSMinimumSystemVersion = 13.0;
+				INFOPLIST_KEY_LSMinimumSystemVersion = 26.0;
 				INFOPLIST_KEY_NSPrincipalClass = NSApplication;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
-				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				MACOSX_DEPLOYMENT_TARGET = 26.0;
 				MARKETING_VERSION = 0.1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.launchgrid.app;
 				PRODUCT_NAME = "$(TARGET_NAME)";
