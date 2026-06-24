@@ -10,7 +10,7 @@ struct AppIconView: View {
 
     @State private var isHovering = false
     @State private var image: NSImage?
-    @State private var suppressClick = false
+    @State private var requestedPath = ""
 
     var body: some View {
         Button(action: launchIfAllowed) {
@@ -35,7 +35,6 @@ struct AppIconView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(LaunchGridIconButtonStyle(isHovering: isHovering))
-        .simultaneousGesture(clickGuardGesture)
         .onHover { hovering in
             withAnimation(.easeOut(duration: 0.12)) {
                 isHovering = hovering
@@ -51,27 +50,8 @@ struct AppIconView: View {
         .accessibilityLabel(app.name)
     }
 
-    private var clickGuardGesture: some Gesture {
-        DragGesture(minimumDistance: 0)
-            .onChanged { value in
-                guard !suppressClick else {
-                    return
-                }
-
-                if abs(value.translation.width) > layout.clickCancelDistance
-                    || abs(value.translation.height) > layout.clickCancelDistance {
-                    suppressClick = true
-                }
-            }
-            .onEnded { _ in
-                DispatchQueue.main.async {
-                    suppressClick = false
-                }
-            }
-    }
-
     private func launchIfAllowed() {
-        guard canLaunch, !suppressClick else {
+        guard canLaunch else {
             return
         }
 
@@ -79,9 +59,23 @@ struct AppIconView: View {
     }
 
     private func loadIcon() {
-        iconCache.loadIcon(for: app) { loadedImage in
+        let path = app.normalizedPath
+        requestedPath = path
+        iconCache.loadIcon(forPath: path) { loadedImage in
+            guard requestedPath == path else {
+                return
+            }
+
             image = loadedImage
         }
+    }
+}
+
+extension AppIconView: Equatable {
+    static func == (lhs: AppIconView, rhs: AppIconView) -> Bool {
+        lhs.app == rhs.app
+            && lhs.layout == rhs.layout
+            && lhs.canLaunch == rhs.canLaunch
     }
 }
 

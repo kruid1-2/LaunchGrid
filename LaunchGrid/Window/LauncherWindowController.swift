@@ -3,27 +3,39 @@ import SwiftUI
 
 final class LauncherWindowController: NSWindowController, NSWindowDelegate {
     private let viewModel = LauncherViewModel()
+    private let pager = PagerViewModel()
     private let iconCache = IconCache()
+    private let pagingInputController = PagingInputController()
     private var screenObserver: NSObjectProtocol?
 
     init() {
         let screen = MouseScreenResolver.currentMouseScreen()
         let panel = LauncherPanel(frame: screen.frame)
         super.init(window: panel)
+        viewModel.updateScreenLayout(screenFrame: screen.frame, visibleFrame: screen.visibleFrame)
 
         panel.delegate = self
         panel.keyDownHandler = { [weak self] event in
             self?.handleKeyDown(event) ?? false
         }
-        panel.contentViewController = NSHostingController(
+        panel.scrollWheelHandler = { [weak self] event in
+            self?.pagingInputController.handleScrollWheel(event) ?? false
+        }
+
+        let rootHostingView = LauncherRootHostingView(
             rootView: LauncherView(
                 viewModel: viewModel,
+                pager: pager,
                 iconCache: iconCache,
                 onDismiss: { [weak self] in
                     self?.hideLauncher()
                 }
             )
         )
+        rootHostingView.onBackgroundClick = { [weak self] in
+            self?.hideLauncher()
+        }
+        panel.contentView = rootHostingView
 
         installScreenObserver()
         viewModel.loadApplicationsIfNeeded()
@@ -45,7 +57,9 @@ final class LauncherWindowController: NSWindowController, NSWindowDelegate {
         }
 
         let screen = MouseScreenResolver.currentMouseScreen()
-        window.setFrame(screen.frame, display: true)
+        applyScreen(screen)
+        configurePagingInput()
+        pagingInputController.start(window: window)
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
 
@@ -55,6 +69,7 @@ final class LauncherWindowController: NSWindowController, NSWindowDelegate {
     }
 
     func hideLauncher() {
+        pagingInputController.stop()
         window?.orderOut(nil)
     }
 
@@ -73,8 +88,57 @@ final class LauncherWindowController: NSWindowController, NSWindowDelegate {
                 return
             }
 
-            self.window?.setFrame(MouseScreenResolver.currentMouseScreen().frame, display: true)
+            let screen = self.window?.screen ?? MouseScreenResolver.currentMouseScreen()
+            self.applyScreen(screen)
         }
+    }
+
+    private func applyScreen(_ screen: NSScreen) {
+        window?.setFrame(screen.frame, display: true)
+        viewModel.updateScreenLayout(screenFrame: screen.frame, visibleFrame: screen.visibleFrame)
+        configurePagingInput()
+    }
+
+    private func configurePagingInput() {
+        pagingInputController.configuration = PagingInputController.Configuration(
+            state: { [weak self] in
+                guard let self else {
+                    return .empty
+                }
+
+                let layout = self.currentLayout()
+                return PagingInputController.State(
+                    currentPage: self.pager.currentPage,
+                    pageCount: self.pager.pageCount,
+                    isTransitioning: self.pager.isPageTransitioning,
+                    threshold: layout.scrollThreshold,
+                    pageWidth: layout.pageWidth,
+                    animationDuration: layout.pageAnimationDuration
+                )
+            },
+            onTrackOffset: { [weak self] offset in
+                self?.pager.setInteractiveOffset(offset)
+            },
+            onCommit: { [weak self] direction, duration in
+                guard let self else {
+                    return
+                }
+
+                self.pager.stepPage(
+                    direction,
+                    pageWidth: self.currentLayout().pageWidth,
+                    animationDuration: duration
+                )
+            },
+            onCancel: { [weak self] duration in
+                self?.pager.cancelDrag(animationDuration: duration)
+            }
+        )
+    }
+
+    private func currentLayout() -> LaunchpadLayout {
+        let size = window?.frame.size ?? NSScreen.main?.frame.size ?? CGSize(width: 1024, height: 768)
+        return LaunchpadMetrics.layout(for: size, screenInsets: viewModel.screenInsets)
     }
 
     private func handleKeyDown(_ event: NSEvent) -> Bool {

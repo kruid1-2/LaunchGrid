@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 
 @MainActor
@@ -6,6 +7,7 @@ final class LauncherViewModel: ObservableObject {
     @Published var searchText = ""
     @Published var isScanning = false
     @Published var errorMessage: String?
+    @Published private(set) var screenInsets = LaunchpadScreenInsets.zero
 
     private let scanner: AppScanner
     private let launcher: AppLauncher
@@ -54,6 +56,15 @@ final class LauncherViewModel: ObservableObject {
 
     func clearSearch() {
         searchText = ""
+    }
+
+    func updateScreenLayout(screenFrame: CGRect, visibleFrame: CGRect) {
+        let nextInsets = LaunchpadScreenInsets(screenFrame: screenFrame, visibleFrame: visibleFrame)
+        guard nextInsets != screenInsets else {
+            return
+        }
+
+        screenInsets = nextInsets
     }
 
     func launch(_ app: AppItem, onSuccess: @escaping () -> Void) {

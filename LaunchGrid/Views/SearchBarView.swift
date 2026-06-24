@@ -27,6 +27,10 @@ struct SearchBarView: View {
             Capsule()
                 .strokeBorder(.white.opacity(0.28), lineWidth: 1)
         )
+        .contentShape(Rectangle())
+        .onTapGesture {
+            focusSearch()
+        }
         .onAppear {
             focusSearch()
         }

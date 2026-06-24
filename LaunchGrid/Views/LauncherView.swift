@@ -1,21 +1,22 @@
-import AppKit
 import SwiftUI
 
 struct LauncherView: View {
     @ObservedObject var viewModel: LauncherViewModel
-    @StateObject private var pager = PagerViewModel()
+    @ObservedObject var pager: PagerViewModel
 
     let iconCache: IconCache
     let onDismiss: () -> Void
 
     var body: some View {
         GeometryReader { geometry in
-            let layout = LaunchpadMetrics.layout(for: geometry.size)
+            let layout = LaunchpadMetrics.layout(
+                for: geometry.size,
+                screenInsets: viewModel.screenInsets
+            )
+            let contentCenterX = layout.contentFrame.midX
+            let debugWidth = min(max(1, layout.contentFrame.width - 32), 430)
 
             ZStack {
-                BackgroundClickView(onClick: onDismiss)
-                    .ignoresSafeArea()
-
                 Rectangle()
                     .fill(.regularMaterial)
                     .ignoresSafeArea()
@@ -26,83 +27,123 @@ struct LauncherView: View {
                     .ignoresSafeArea()
                     .allowsHitTesting(false)
 
-                VStack(spacing: 0) {
-                    SearchBarView(text: $viewModel.searchText)
-                        .frame(width: layout.searchWidth, height: layout.searchHeight)
-                        .padding(.top, layout.topPadding)
-
-                    statusView
-                        .frame(height: layout.statusHeight)
-                        .padding(.top, 12)
-
-                    ZStack {
-                        Color.clear
-                            .contentShape(Rectangle())
-
-                        ForEach(pager.visiblePageIndexes, id: \.self) { pageIndex in
-                            AppPageView(
-                                apps: pager.pages[safe: pageIndex] ?? [],
-                                layout: layout,
-                                iconCache: iconCache,
-                                canLaunchApps: !pager.isInteractionLocked,
-                                onLaunch: { app in
-                                    viewModel.launch(app, onSuccess: onDismiss)
-                                }
-                            )
-                            .offset(x: CGFloat(pageIndex - pager.currentPage) * layout.pageWidth + pager.pageOffset)
-                        }
-                    }
-                    .contentShape(Rectangle())
-                    .simultaneousGesture(pageDragGesture(layout: layout))
-                    .frame(width: layout.pageWidth, height: layout.gridHeight)
-                    .clipped()
-                    .padding(.top, layout.gridTopGap)
-
-                    Spacer(minLength: 0)
-
-                    PageIndicatorView(
-                        pageCount: pager.pageCount,
-                        currentPage: pager.currentPage,
-                        layout: layout
+                SearchBarView(text: $viewModel.searchText)
+                    .frame(width: layout.searchWidth, height: layout.searchHeight)
+                    .position(
+                        x: contentCenterX,
+                        y: layout.contentFrame.minY + layout.topPadding + layout.searchHeight / 2
                     )
-                    .padding(.bottom, layout.bottomPadding)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
 
-                PagingEventView(
-                    currentPage: pager.currentPage,
+                statusView
+                    .frame(width: max(1, min(layout.contentFrame.width, 420)), height: layout.statusHeight)
+                    .position(
+                        x: contentCenterX,
+                        y: layout.contentFrame.minY + layout.topPadding + layout.searchHeight + 17
+                    )
+
+                pageContainer(layout: layout)
+                    .position(
+                        x: contentCenterX,
+                        y: layout.gridTop + layout.gridHeight / 2
+                    )
+
+                PageIndicatorView(
                     pageCount: pager.pageCount,
-                    isTransitioning: pager.isPageTransitioning,
-                    pageWidth: layout.pageWidth,
-                    threshold: layout.scrollThreshold,
-                    maxDragOffset: layout.maxDragOffset,
-                    onDrag: { offset in
-                        pager.setDragOffset(offset, limit: layout.maxDragOffset)
-                    },
-                    onCommit: { step in
-                        pager.stepPage(step, animationDuration: layout.pageAnimationDuration)
-                    },
-                    onCancel: {
-                        pager.cancelDrag(animationDuration: layout.pageAnimationDuration)
-                    }
+                    currentPage: pager.currentPage,
+                    layout: layout
                 )
-                .ignoresSafeArea()
-                .allowsHitTesting(false)
+                .position(
+                    x: contentCenterX,
+                    y: layout.pageIndicatorCenterY
+                )
+
+                pagingDebugOverlay(layout: layout)
+                    .frame(width: debugWidth, alignment: .leading)
+                    .position(
+                        x: layout.contentFrame.minX + 16 + debugWidth / 2,
+                        y: layout.contentFrame.minY + 72
+                    )
+
             }
             .onAppear {
                 updatePager(layout: layout)
+                preloadIcons(layout: layout)
             }
-            .onChange(of: viewModel.apps) { _, _ in
+            .onChange(of: viewModel.apps) { _ in
                 updatePager(layout: layout)
+                preloadIcons(layout: layout)
             }
-            .onChange(of: viewModel.searchText) { _, _ in
+            .onChange(of: viewModel.searchText) { _ in
                 updatePager(layout: layout)
+                preloadIcons(layout: layout)
             }
-            .onChange(of: layout.pageCapacity) { _, _ in
+            .onChange(of: layout.pageCapacity) { _ in
                 updatePager(layout: layout)
+                preloadIcons(layout: layout)
+            }
+            .onChange(of: viewModel.screenInsets) { _ in
+                updatePager(layout: layout)
+                preloadIcons(layout: layout)
+            }
+            .onChange(of: pager.currentPage) { _ in
+                preloadIcons(layout: layout)
             }
         }
         .preferredColorScheme(.dark)
+    }
+
+    private func pageContainer(layout: LaunchpadLayout) -> some View {
+        HStack(spacing: 0) {
+            ForEach([pager.currentPage - 1, pager.currentPage, pager.currentPage + 1], id: \.self) { pageIndex in
+                if let apps = appsForPage(pageIndex) {
+                    AppPageView(
+                        apps: apps,
+                        layout: layout,
+                        iconCache: iconCache,
+                        canLaunchApps: !pager.isInteractionLocked,
+                        onLaunch: { app in
+                            guard !pager.isInteractionLocked else {
+                                return
+                            }
+
+                            viewModel.launch(app, onSuccess: onDismiss)
+                        }
+                    )
+                } else {
+                    Color.clear
+                        .frame(width: layout.pageWidth, height: layout.gridHeight)
+                }
+            }
+        }
+        .frame(width: layout.pageWidth * 3, height: layout.gridHeight, alignment: .leading)
+        .offset(x: -layout.pageWidth + pager.pageOffset)
+        .frame(width: layout.pageWidth, height: layout.gridHeight)
+        .clipped()
+    }
+
+    private func appsForPage(_ pageIndex: Int) -> [AppItem]? {
+        guard pager.pages.indices.contains(pageIndex) else {
+            return nil
+        }
+
+        return pager.pages[pageIndex]
+    }
+
+    private func pagingDebugOverlay(layout: LaunchpadLayout) -> some View {
+        let currentPageItems = pager.pages[safe: pager.currentPage]?.count ?? 0
+        let text = "page \(pager.currentPage + 1)/\(pager.pageCount)  offset \(Int(pager.pageOffset))  apps \(currentPageItems)/\(pager.filteredCount)  cap \(layout.pageCapacity)"
+
+        return Text(text)
+            .font(.system(size: 12, weight: .semibold, design: .monospaced))
+            .foregroundStyle(.white)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(.black.opacity(0.48), in: Capsule())
+            .overlay(
+                Capsule()
+                    .stroke(.white.opacity(0.24), lineWidth: 1)
+            )
+            .allowsHitTesting(false)
     }
 
     @ViewBuilder
@@ -134,79 +175,18 @@ struct LauncherView: View {
         )
     }
 
-    private func pageDragGesture(layout: LaunchpadLayout) -> some Gesture {
-        DragGesture(minimumDistance: 16, coordinateSpace: .local)
-            .onChanged { value in
-                guard !pager.isPageTransitioning else {
-                    return
-                }
-
-                guard abs(value.translation.width) > abs(value.translation.height) else {
-                    return
-                }
-
-                pager.setDragOffset(
-                    resistedPageOffset(value.translation.width),
-                    limit: layout.maxDragOffset
-                )
-            }
-            .onEnded { value in
-                guard abs(value.translation.width) > abs(value.translation.height) else {
-                    pager.cancelDrag(animationDuration: layout.pageAnimationDuration)
-                    return
-                }
-
-                let projected = abs(value.predictedEndTranslation.width) > abs(value.translation.width)
-                    ? value.predictedEndTranslation.width
-                    : value.translation.width
-
-                guard abs(projected) >= layout.scrollThreshold else {
-                    pager.cancelDrag(animationDuration: layout.pageAnimationDuration)
-                    return
-                }
-
-                pager.stepPage(
-                    projected < 0 ? 1 : -1,
-                    animationDuration: layout.pageAnimationDuration
-                )
-            }
-    }
-
-    private func resistedPageOffset(_ offset: CGFloat) -> CGFloat {
-        if (pager.currentPage == 0 && offset > 0)
-            || (pager.currentPage >= pager.pageCount - 1 && offset < 0) {
-            return offset * 0.28
+    private func preloadIcons(layout: LaunchpadLayout) {
+        let pageApps = pager.preloadPageIndexes.flatMap { pageIndex in
+            pager.pages[safe: pageIndex] ?? []
         }
-
-        return offset
+        iconCache.preloadIcons(for: pageApps)
     }
+
 }
 
 private extension Array {
     subscript(safe index: Index) -> Element? {
         indices.contains(index) ? self[index] : nil
-    }
-}
-
-private struct BackgroundClickView: NSViewRepresentable {
-    let onClick: () -> Void
-
-    func makeNSView(context: Context) -> ClickCatchingView {
-        let view = ClickCatchingView()
-        view.onClick = onClick
-        return view
-    }
-
-    func updateNSView(_ nsView: ClickCatchingView, context: Context) {
-        nsView.onClick = onClick
-    }
-}
-
-private final class ClickCatchingView: NSView {
-    var onClick: (() -> Void)?
-
-    override func mouseDown(with event: NSEvent) {
-        onClick?()
     }
 }
 

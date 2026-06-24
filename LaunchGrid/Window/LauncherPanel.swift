@@ -2,6 +2,7 @@ import AppKit
 
 final class LauncherPanel: NSPanel {
     var keyDownHandler: ((NSEvent) -> Bool)?
+    var scrollWheelHandler: ((NSEvent) -> Bool)?
 
     init(frame: NSRect) {
         super.init(
@@ -20,7 +21,7 @@ final class LauncherPanel: NSPanel {
         hasShadow = false
         hidesOnDeactivate = false
         isMovable = false
-        level = .statusBar
+        level = .normal
         collectionBehavior = [
             .canJoinAllSpaces,
             .fullScreenAuxiliary,
@@ -42,6 +43,10 @@ final class LauncherPanel: NSPanel {
     }
 
     override func sendEvent(_ event: NSEvent) {
+        if event.type == .scrollWheel, scrollWheelHandler?(event) == true {
+            return
+        }
+
         if event.type == .keyDown, keyDownHandler?(event) == true {
             return
         }

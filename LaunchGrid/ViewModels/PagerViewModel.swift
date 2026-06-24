@@ -15,20 +15,21 @@ final class PagerViewModel: ObservableObject {
     private var lastQuery = ""
     private var lastPageCapacity = 0
     private var rememberedUnfilteredPage = 0
-    private var transitionTask: Task<Void, Never>?
 
-    var visiblePageIndexes: [Int] {
+    var preloadPageIndexes: [Int] {
         guard pageCount > 0 else {
             return []
         }
 
-        let lowerBound = max(0, currentPage - 1)
-        let upperBound = min(pageCount - 1, currentPage + 1)
-        return Array(lowerBound...upperBound)
+        return compactPageIndexes([currentPage - 1, currentPage, currentPage + 1])
+    }
+
+    var visiblePageIndexes: [Int] {
+        compactPageIndexes([currentPage - 1, currentPage, currentPage + 1])
     }
 
     var isInteractionLocked: Bool {
-        isPageTransitioning || abs(pageOffset) > 1
+        isPageTransitioning
     }
 
     func update(apps: [AppItem], searchText: String, pageCapacity: Int) {
@@ -66,53 +67,55 @@ final class PagerViewModel: ObservableObject {
         }
 
         filteredCount = filteredApps.count
-        pages = Self.chunk(filteredApps, capacity: capacity)
+        let nextPages = Self.chunk(filteredApps, capacity: capacity)
+        pages = nextPages.isEmpty ? [[]] : nextPages
         pageCount = pages.count
         clampCurrentPage()
         pageOffset = 0
         rebuildCount += 1
     }
 
-    func setDragOffset(_ offset: CGFloat, limit: CGFloat) {
+    func setInteractiveOffset(_ offset: CGFloat) {
         guard !isPageTransitioning else {
             return
         }
 
-        pageOffset = min(max(offset, -limit), limit)
+        pageOffset = offset
     }
 
     func cancelDrag(animationDuration: TimeInterval) {
-        withAnimation(.easeOut(duration: animationDuration * 0.72)) {
+        withAnimation(.timingCurve(0.22, 0.72, 0.0, 1.0, duration: animationDuration)) {
             pageOffset = 0
         }
     }
 
-    func stepPage(_ step: Int, animationDuration: TimeInterval) {
+    func stepPage(_ direction: PagingDirection, pageWidth: CGFloat, animationDuration: TimeInterval) {
         guard !isPageTransitioning, pageCount > 1 else {
             return
         }
 
+        let step = direction.step
         let targetPage = min(max(currentPage + step, 0), pageCount - 1)
         guard targetPage != currentPage else {
             cancelDrag(animationDuration: animationDuration)
             return
         }
 
-        transitionTask?.cancel()
         isPageTransitioning = true
+        let targetOffset: CGFloat = direction == .next ? -pageWidth : pageWidth
 
-        withAnimation(.easeInOut(duration: animationDuration)) {
-            currentPage = targetPage
-            pageOffset = 0
+        withAnimation(.timingCurve(0.22, 0.72, 0.0, 1.0, duration: animationDuration)) {
+            pageOffset = targetOffset
         }
 
-        transitionTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: UInt64((animationDuration + 0.08) * 1_000_000_000))
-            await MainActor.run {
+        DispatchQueue.main.asyncAfter(deadline: .now() + animationDuration) { [weak self] in
+            Task { @MainActor in
                 guard let self else {
                     return
                 }
 
+                self.currentPage = targetPage
+                self.pageOffset = 0
                 self.isPageTransitioning = false
             }
         }
@@ -122,9 +125,20 @@ final class PagerViewModel: ObservableObject {
         currentPage = min(max(currentPage, 0), max(pageCount - 1, 0))
     }
 
+    private func compactPageIndexes(_ indexes: [Int]) -> [Int] {
+        var result: [Int] = []
+        result.reserveCapacity(indexes.count)
+
+        for index in indexes where index >= 0 && index < pageCount && !result.contains(index) {
+            result.append(index)
+        }
+
+        return result
+    }
+
     private static func chunk(_ apps: [AppItem], capacity: Int) -> [[AppItem]] {
         guard !apps.isEmpty else {
-            return [[]]
+            return []
         }
 
         var pages: [[AppItem]] = []
@@ -137,6 +151,6 @@ final class PagerViewModel: ObservableObject {
             startIndex = endIndex
         }
 
-        return pages
+        return pages.filter { !$0.isEmpty }
     }
 }

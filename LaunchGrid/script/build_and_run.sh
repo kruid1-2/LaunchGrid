@@ -4,11 +4,11 @@ set -euo pipefail
 MODE="${1:-run}"
 APP_NAME="LaunchGrid"
 BUNDLE_ID="com.launchgrid.app"
-MIN_SYSTEM_VERSION="26.0"
+MIN_SYSTEM_VERSION="13.0"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DERIVED_DATA="$ROOT_DIR/DerivedData"
-DIST_DIR="$ROOT_DIR/dist"
+DIST_DIR="${LAUNCHGRID_DIST_DIR:-/private/tmp/LaunchGrid-dist}"
 APP_BUNDLE="$DIST_DIR/$APP_NAME.app"
 APP_CONTENTS="$APP_BUNDLE/Contents"
 APP_MACOS="$APP_CONTENTS/MacOS"
@@ -32,17 +32,22 @@ build_app() {
 
 stage_bundle() {
   local build_binary="$DERIVED_DATA/Build/Products/Debug/$APP_NAME.app"
+  local unsigned_bundle="$DIST_DIR/$APP_NAME-stage"
 
   if [[ ! -d "$build_binary" ]]; then
     echo "Built binary not found at $build_binary" >&2
     exit 1
   fi
 
-  rm -rf "$APP_BUNDLE"
+  rm -rf "$APP_BUNDLE" "$unsigned_bundle"
   mkdir -p "$DIST_DIR"
-  ditto --noextattr --noqtn "$build_binary" "$APP_BUNDLE"
-  xattr -cr "$APP_BUNDLE"
-  codesign --force --sign - "$APP_BUNDLE" >/dev/null
+  ditto --noextattr --noqtn "$build_binary" "$unsigned_bundle"
+  clear_bundle_metadata "$unsigned_bundle"
+  codesign --force --sign - "$unsigned_bundle" >/dev/null
+  clear_bundle_metadata "$unsigned_bundle"
+  codesign --force --sign - "$unsigned_bundle" >/dev/null
+  mv "$unsigned_bundle" "$APP_BUNDLE"
+  codesign --verify --deep --strict "$APP_BUNDLE"
 }
 
 open_app() {
@@ -59,6 +64,14 @@ wait_for_app() {
 
   echo "$APP_NAME did not report as running after launch" >&2
   return 1
+}
+
+clear_bundle_metadata() {
+  local bundle="$1"
+  xattr -cr "$bundle" 2>/dev/null || true
+  find "$bundle" -exec xattr -d com.apple.FinderInfo {} \; 2>/dev/null || true
+  find "$bundle" -exec xattr -d com.apple.ResourceFork {} \; 2>/dev/null || true
+  find "$bundle" -exec xattr -d 'com.apple.fileprovider.fpfs#P' {} \; 2>/dev/null || true
 }
 
 pkill -x "$APP_NAME" >/dev/null 2>&1 || true

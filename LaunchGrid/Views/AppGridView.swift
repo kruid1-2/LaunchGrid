@@ -19,6 +19,7 @@ struct AppGridView: View {
                         onLaunch(app)
                     }
                 )
+                .equatable()
             }
         }
         .frame(width: layout.gridWidth, height: layout.gridHeight, alignment: .topLeading)
