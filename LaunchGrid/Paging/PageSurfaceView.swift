@@ -7,6 +7,7 @@ final class PageSurfaceView: NSView {
     private weak var iconCache: IconCache?
     private var iconImages: [String: NSImage] = [:]
     private var generation = 0
+    private(set) var pageIndex = Int.min
     private var hoveredIndex: Int?
     private var pressedIndex: Int?
     private var mouseDownPoint: CGPoint?
@@ -52,6 +53,7 @@ final class PageSurfaceView: NSView {
         generation: Int,
         onLaunch: @escaping (AppItem) -> Void
     ) {
+        self.pageIndex = pageIndex
         self.apps = apps
         self.layout = layout
         self.iconCache = iconCache
@@ -66,6 +68,24 @@ final class PageSurfaceView: NSView {
         iconImages = iconImages.filter { validPaths.contains($0.key) }
         requestMissingIcons(iconCache: iconCache, generation: generation)
         needsDisplay = true
+    }
+
+    var hasDrawableContent: Bool {
+        layout != nil
+    }
+
+    func setDebugBorder(_ color: NSColor?) {
+        guard let layer else {
+            return
+        }
+
+        if let color {
+            layer.borderWidth = 3
+            layer.borderColor = color.cgColor
+        } else {
+            layer.borderWidth = 0
+            layer.borderColor = nil
+        }
     }
 
     override func updateTrackingAreas() {
