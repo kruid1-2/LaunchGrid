@@ -55,7 +55,9 @@ final class PagingSurfaceController {
     private var gestureStartTranslation: CGFloat = 0
     private var isSettling = false
     private var settleGeneration = 0
+    private var transitionSessionID: UInt64 = 0
     private var activeDestination: PagingDirection?
+    private var activeTransition: ActivePagingTransition?
     private let motionResponseTime: TimeInterval = 0.008
     private let springMass: CGFloat = 1.0
     private let springStiffness: CGFloat = 380
@@ -81,6 +83,20 @@ final class PagingSurfaceController {
         let velocity: CGFloat
         let currentPage: Int
         let isSettling: Bool
+    }
+
+    private struct ActivePagingTransition {
+        let sessionID: UInt64
+        let direction: PagingDirection
+        let sourceSurfaceID: ObjectIdentifier
+        let destinationSurfaceID: ObjectIdentifier
+        let sourcePageIndex: Int
+        let destinationPageIndex: Int
+
+        func contains(_ surface: PageSurfaceView) -> Bool {
+            let id = ObjectIdentifier(surface)
+            return id == sourceSurfaceID || id == destinationSurfaceID
+        }
     }
 
     private enum SettleCompletion {
@@ -145,7 +161,10 @@ final class PagingSurfaceController {
         layout = context.layout
         iconCache = context.iconCache
         onLaunch = context.onLaunch
-        currentPage = min(max(context.currentPage, 0), max(context.pages.count - 1, 0))
+        let contextCurrentPage = min(max(context.currentPage, 0), max(context.pages.count - 1, 0))
+        if activeTransition == nil && !isSettling {
+            currentPage = contextCurrentPage
+        }
 
         configureContainer(context: context)
         driver.start()
@@ -159,6 +178,14 @@ final class PagingSurfaceController {
             return
         }
 
+        guard activeTransition == nil && !isSettling else {
+            logger.notice(
+                "Surface install/update deferred during active transition contextPage=\(contextCurrentPage) currentPage=\(self.currentPage) settling=\(self.isSettling)"
+            )
+            return
+        }
+
+        currentPage = contextCurrentPage
         signature = nextSignature
         configureAllSurfaces(context: context)
         runDebugContinuityProbeIfNeeded()
@@ -174,15 +201,22 @@ final class PagingSurfaceController {
         }
 
         interruptSettleIfNeeded(reason: "new-gesture")
+        let targetPage = currentPage + direction.step
+        guard pages.indices.contains(targetPage) else {
+            logger.notice(
+                "Surface gesture refused boundary page=\(self.currentPage) direction=\(direction.rawValue, privacy: .public)"
+            )
+            return false
+        }
+
         guard destinationSurfaceIsReady(for: direction) else {
-            logger.error(
+            logger.notice(
                 "Surface gesture refused destination not ready page=\(self.currentPage) direction=\(direction.rawValue, privacy: .public) previous=\(self.previousSurface.pageIndex) current=\(self.currentSurface.pageIndex) next=\(self.nextSurface.pageIndex)"
             )
             return false
         }
 
-        activeDestination = direction
-        updateDebugSurfaceBorders(destination: direction)
+        beginActiveTransition(direction: direction)
         gestureStartTranslation = currentTranslation
         driver.setTarget(currentTranslation)
         driver.start()
@@ -280,11 +314,11 @@ final class PagingSurfaceController {
         logger.notice("Surface invalidated reason=\(reason)")
         signature = nil
         settleGeneration += 1
-        activeDestination = nil
+        clearActiveTransition()
         stopSettleDebugSampling()
         transitionView.layer?.removeAllAnimations()
         applyTranslation(0, alignToPixel: true)
-        updateDebugSurfaceBorders(destination: nil)
+        updateDebugSurfaceVisuals()
     }
 
     func stopAndRelease() {
@@ -297,7 +331,7 @@ final class PagingSurfaceController {
         signature = nil
         attachedContentView = nil
         onLaunch = nil
-        activeDestination = nil
+        clearActiveTransition()
         logger.notice("Surface stopped surfaceCount=\(self.transitionView.subviews.count)")
     }
 
@@ -353,8 +387,42 @@ final class PagingSurfaceController {
         )
         preloadFarNeighbors(iconCache: context.iconCache)
         applyTranslation(0, alignToPixel: true)
+        clearActiveTransition()
+        updateDebugSurfaceVisuals()
+    }
+
+    private func beginActiveTransition(direction: PagingDirection) {
+        clearActiveTransition()
+        transitionSessionID += 1
+
+        let source = currentSurface
+        let destination = destinationSurface(for: direction)
+        let transition = ActivePagingTransition(
+            sessionID: transitionSessionID,
+            direction: direction,
+            sourceSurfaceID: ObjectIdentifier(source),
+            destinationSurfaceID: ObjectIdentifier(destination),
+            sourcePageIndex: currentPage,
+            destinationPageIndex: currentPage + direction.step
+        )
+
+        activeDestination = direction
+        activeTransition = transition
+        source.setPagingLocked(true)
+        destination.setPagingLocked(true)
+        updateDebugSurfaceVisuals()
+        logger.notice(
+            "Surface tracking began session=\(transition.sessionID) sourcePage=\(transition.sourcePageIndex) destinationPage=\(transition.destinationPageIndex) sourceID=\(self.surfaceID(source), privacy: .public) destinationID=\(self.surfaceID(destination), privacy: .public) previous=\(self.surfaceState(self.previousSurface), privacy: .public) current=\(self.surfaceState(self.currentSurface), privacy: .public) next=\(self.surfaceState(self.nextSurface), privacy: .public)"
+        )
+    }
+
+    private func clearActiveTransition() {
         activeDestination = nil
-        updateDebugSurfaceBorders(destination: nil)
+        activeTransition = nil
+        previousSurface.setPagingLocked(false)
+        currentSurface.setPagingLocked(false)
+        nextSurface.setPagingLocked(false)
+        updateDebugSurfaceVisuals()
     }
 
     private func rotateSlots(direction: PagingDirection) {
@@ -381,28 +449,43 @@ final class PagingSurfaceController {
         iconCache: IconCache,
         onLaunch: @escaping (AppItem) -> Void
     ) {
+        let refreshStart = ContinuousClock.now
+        let surface: PageSurfaceView
+        let pageIndex: Int
+        let role: String
         switch direction {
         case .next:
-            configure(
-                surface: nextSurface,
-                pageIndex: targetPage + 1,
-                layout: layout,
-                iconCache: iconCache,
-                generation: cache.nextGeneration(),
-                onLaunch: onLaunch
-            )
+            surface = nextSurface
+            pageIndex = targetPage + 1
+            role = "next"
         case .previous:
-            configure(
-                surface: previousSurface,
-                pageIndex: targetPage - 1,
-                layout: layout,
-                iconCache: iconCache,
-                generation: cache.nextGeneration(),
-                onLaunch: onLaunch
-            )
+            surface = previousSurface
+            pageIndex = targetPage - 1
+            role = "previous"
         }
+
+        guard canRefreshOffscreen(surface: surface, expectedRole: role) else {
+            logger.fault(
+                "Surface offscreen refresh rejected role=\(role, privacy: .public) requestedPage=\(pageIndex) state=\(self.surfaceState(surface), privacy: .public) transition=\(self.activeTransitionDescription, privacy: .public)"
+            )
+            return
+        }
+
+        let generation = cache.nextGeneration()
         logger.notice(
-            "Surface offscreen refreshed direction=\(direction.rawValue, privacy: .public) targetPage=\(targetPage) previous=\(self.previousSurface.pageIndex) current=\(self.currentSurface.pageIndex) next=\(self.nextSurface.pageIndex)"
+            "Surface offscreen refresh began role=\(role, privacy: .public) requestedPage=\(pageIndex) generation=\(generation) state=\(self.surfaceState(surface), privacy: .public)"
+        )
+        configure(
+            surface: surface,
+            pageIndex: pageIndex,
+            layout: layout,
+            iconCache: iconCache,
+            generation: generation,
+            onLaunch: onLaunch
+        )
+        let elapsed = milliseconds(refreshStart.duration(to: .now))
+        logger.notice(
+            "Surface offscreen refresh ended role=\(role, privacy: .public) requestedPage=\(pageIndex) generation=\(generation) ms=\(elapsed, format: .fixed(precision: 2)) previous=\(self.surfaceState(self.previousSurface), privacy: .public) current=\(self.surfaceState(self.currentSurface), privacy: .public) next=\(self.surfaceState(self.nextSurface), privacy: .public)"
         )
     }
 
@@ -422,9 +505,16 @@ final class PagingSurfaceController {
         generation: Int,
         onLaunch: @escaping (AppItem) -> Void
     ) {
+        if surface.isPagingLocked || activeTransition?.contains(surface) == true {
+            logger.fault(
+                "Visible surface configure blocked role=\(self.roleName(for: surface), privacy: .public) requestedPage=\(pageIndex) currentPage=\(self.currentPage) state=\(self.surfaceState(surface), privacy: .public) transition=\(self.activeTransitionDescription, privacy: .public)"
+            )
+            return
+        }
+
         if activeDestination != nil, visibleSurfacesForActiveTransition().contains(where: { $0 === surface }) {
             logger.fault(
-                "Visible surface configure blocked role=\(self.roleName(for: surface), privacy: .public) requestedPage=\(pageIndex) currentPage=\(self.currentPage)"
+                "Active visible surface configure blocked role=\(self.roleName(for: surface), privacy: .public) requestedPage=\(pageIndex) currentPage=\(self.currentPage) state=\(self.surfaceState(surface), privacy: .public) transition=\(self.activeTransitionDescription, privacy: .public)"
             )
             return
         }
@@ -444,7 +534,7 @@ final class PagingSurfaceController {
         previousSurface.frame = CGRect(x: -pageWidth, y: 0, width: pageWidth, height: pageHeight)
         currentSurface.frame = CGRect(x: 0, y: 0, width: pageWidth, height: pageHeight)
         nextSurface.frame = CGRect(x: pageWidth, y: 0, width: pageWidth, height: pageHeight)
-        updateDebugSurfaceBorders(destination: activeDestination)
+        updateDebugSurfaceVisuals()
     }
 
     private func animateToTarget(
@@ -526,18 +616,19 @@ final class PagingSurfaceController {
         switch completion {
         case .cancel:
             setTranslation(0, alignToPixel: true)
-            activeDestination = nil
-            updateDebugSurfaceBorders(destination: nil)
+            clearActiveTransition()
         case let .commit(direction, targetPage, layout, iconCache, onLaunch, commitPage):
             let rotationStart = ContinuousClock.now
             let centerBefore = centeredSurfaceFrameBeforeRotation(direction: direction)
             let expectedCenterSurface = destinationSurface(for: direction)
+            logger.notice(
+                "Surface slot rotation began direction=\(direction.rawValue, privacy: .public) targetPage=\(targetPage) previous=\(self.surfaceState(self.previousSurface), privacy: .public) current=\(self.surfaceState(self.currentSurface), privacy: .public) next=\(self.surfaceState(self.nextSurface), privacy: .public)"
+            )
             rotateSlots(direction: direction)
             setTranslation(0, alignToPixel: true)
             currentPage = targetPage
             commitPage()
-            activeDestination = nil
-            updateDebugSurfaceBorders(destination: nil)
+            clearActiveTransition()
             let centerAfter = visibleFrame(surface: currentSurface, translation: 0)
             let continuityError = frameDistance(centerBefore, centerAfter)
             let sameSurface = currentSurface === expectedCenterSurface
@@ -623,7 +714,7 @@ final class PagingSurfaceController {
         gestureStartTranslation = visibleTranslation
         driver.reset(to: visibleTranslation)
         isSettling = false
-        updateDebugSurfaceBorders(destination: activeDestination)
+        updateDebugSurfaceVisuals()
         logger.notice(
             "Surface settle interrupted reason=\(reason, privacy: .public) visibleTranslation=\(visibleTranslation) page=\(self.currentPage)"
         )
@@ -786,24 +877,54 @@ final class PagingSurfaceController {
         }
     }
 
-    private func updateDebugSurfaceBorders(destination: PagingDirection?) {
+    private func canRefreshOffscreen(surface: PageSurfaceView, expectedRole: String) -> Bool {
+        guard roleName(for: surface) == expectedRole else {
+            return false
+        }
+        guard activeTransition?.contains(surface) != true, !surface.isPagingLocked else {
+            return false
+        }
+
+        return isFullyOffscreen(surface: surface)
+    }
+
+    private func isFullyOffscreen(surface: PageSurfaceView) -> Bool {
+        let frame = visibleFrame(surface: surface, translation: currentTranslation)
+        let viewport = containerView.frame
+        let tolerance: CGFloat = 0.5
+        return frame.maxX <= viewport.minX + tolerance
+            || frame.minX >= viewport.maxX - tolerance
+    }
+
+    private func updateDebugSurfaceVisuals() {
         guard debugSurfaceBordersEnabled else {
             previousSurface.setDebugBorder(nil)
             currentSurface.setDebugBorder(nil)
             nextSurface.setDebugBorder(nil)
+            previousSurface.setDebugOverlay(nil)
+            currentSurface.setDebugOverlay(nil)
+            nextSurface.setDebugOverlay(nil)
             return
         }
 
-        let fallback = NSColor.systemBlue
-        previousSurface.setDebugBorder(fallback)
+        previousSurface.setDebugBorder(.systemBlue)
         currentSurface.setDebugBorder(.systemRed)
-        nextSurface.setDebugBorder(fallback)
+        nextSurface.setDebugBorder(.systemGreen)
+        previousSurface.setDebugOverlay(debugOverlay(role: "previous", surface: previousSurface))
+        currentSurface.setDebugOverlay(debugOverlay(role: "current", surface: currentSurface))
+        nextSurface.setDebugOverlay(debugOverlay(role: "next", surface: nextSurface))
+    }
 
-        if let destination {
-            destinationSurface(for: destination).setDebugBorder(.systemGreen)
-        } else {
-            nextSurface.setDebugBorder(.systemGreen)
-        }
+    private func debugOverlay(role: String, surface: PageSurfaceView) -> String {
+        let readiness = surface.hasDrawableContent ? "ready" : "empty"
+        let visibility = isFullyOffscreen(surface: surface) ? "offscreen" : "visible"
+        let lock = surface.isPagingLocked ? "locked" : "free"
+        let pending = surface.hasPendingDisplayRefresh ? "pending" : "idle"
+        return """
+        \(role) p=\(surface.pageIndex) \(shortSurfaceID(surface))
+        apps=\(surface.appCount) gen=\(surface.generation) \(readiness)
+        \(lock) \(visibility) reload=\(pending)
+        """
     }
 
     private func roleName(for surface: PageSurfaceView) -> String {
@@ -859,7 +980,7 @@ final class PagingSurfaceController {
             }
 
             activeDestination = direction
-            updateDebugSurfaceBorders(destination: direction)
+            updateDebugSurfaceVisuals()
             let destination = destinationSurface(for: direction)
             let ratios: [CGFloat] = [0.25, 0.5, 0.75]
             for ratio in ratios {
@@ -878,7 +999,7 @@ final class PagingSurfaceController {
                 )
             }
             activeDestination = nil
-            updateDebugSurfaceBorders(destination: nil)
+            updateDebugSurfaceVisuals()
         }
 
         logger.notice(
@@ -901,6 +1022,25 @@ final class PagingSurfaceController {
 
     private func surfaceID(_ surface: PageSurfaceView) -> String {
         String(describing: ObjectIdentifier(surface))
+    }
+
+    private func shortSurfaceID(_ surface: PageSurfaceView) -> String {
+        let id = surfaceID(surface)
+        return String(id.suffix(8))
+    }
+
+    private var activeTransitionDescription: String {
+        guard let transition = activeTransition else {
+            return "none"
+        }
+
+        return "session=\(transition.sessionID) direction=\(transition.direction.rawValue) sourcePage=\(transition.sourcePageIndex) destinationPage=\(transition.destinationPageIndex) sourceID=\(transition.sourceSurfaceID) destinationID=\(transition.destinationSurfaceID)"
+    }
+
+    private func surfaceState(_ surface: PageSurfaceView) -> String {
+        let opacity = surface.layer?.opacity ?? 1
+        let visibility = isFullyOffscreen(surface: surface) ? "offscreen" : "visible"
+        return "role=\(roleName(for: surface)) id=\(surfaceID(surface)) page=\(surface.pageIndex) apps=\(surface.appCount) gen=\(surface.generation) frame=\(surface.frame.debugDescription) hidden=\(surface.isHidden) alpha=\(surface.alphaValue) opacity=\(opacity) \(visibility) locked=\(surface.isPagingLocked) pendingDisplay=\(surface.hasPendingDisplayRefresh)"
     }
 
     private func milliseconds(_ duration: Duration) -> Double {

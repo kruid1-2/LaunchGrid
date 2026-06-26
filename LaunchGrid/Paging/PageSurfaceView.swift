@@ -6,7 +6,7 @@ final class PageSurfaceView: NSView {
     private var layout: LaunchpadLayout?
     private weak var iconCache: IconCache?
     private var iconImages: [String: NSImage] = [:]
-    private var generation = 0
+    private(set) var generation = 0
     private(set) var pageIndex = Int.min
     private var hoveredIndex: Int?
     private var pressedIndex: Int?
@@ -14,6 +14,8 @@ final class PageSurfaceView: NSView {
     private var trackingArea: NSTrackingArea?
     private var onLaunch: ((AppItem) -> Void)?
     private var displayRefreshScheduled = false
+    private(set) var isPagingLocked = false
+    private var debugOverlayText: String?
 
     private let labelParagraphStyle: NSParagraphStyle = {
         let paragraphStyle = NSMutableParagraphStyle()
@@ -88,6 +90,32 @@ final class PageSurfaceView: NSView {
         }
     }
 
+    func setPagingLocked(_ locked: Bool) {
+        guard isPagingLocked != locked else {
+            return
+        }
+
+        isPagingLocked = locked
+        needsDisplay = true
+    }
+
+    func setDebugOverlay(_ text: String?) {
+        guard debugOverlayText != text else {
+            return
+        }
+
+        debugOverlayText = text
+        needsDisplay = true
+    }
+
+    var appCount: Int {
+        apps.count
+    }
+
+    var hasPendingDisplayRefresh: Bool {
+        displayRefreshScheduled
+    }
+
     override func updateTrackingAreas() {
         if let trackingArea {
             removeTrackingArea(trackingArea)
@@ -122,6 +150,7 @@ final class PageSurfaceView: NSView {
         for index in apps.indices {
             drawApp(at: index, layout: layout)
         }
+        drawDebugOverlayIfNeeded()
     }
 
     override func mouseMoved(with event: NSEvent) {
@@ -332,6 +361,29 @@ final class PageSurfaceView: NSView {
             attributes: attributes
         )
         NSGraphicsContext.restoreGraphicsState()
+        drawDebugOverlayIfNeeded()
+    }
+
+    private func drawDebugOverlayIfNeeded() {
+        guard let debugOverlayText, !debugOverlayText.isEmpty else {
+            return
+        }
+
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.alignment = .left
+        paragraph.lineBreakMode = .byTruncatingTail
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.monospacedSystemFont(ofSize: 10, weight: .medium),
+            .foregroundColor: NSColor.white,
+            .backgroundColor: NSColor.black.withAlphaComponent(0.55),
+            .paragraphStyle: paragraph
+        ]
+        let rect = CGRect(x: 10, y: 10, width: 230, height: 54)
+        (debugOverlayText as NSString).draw(
+            with: rect,
+            options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine],
+            attributes: attributes
+        )
     }
 
     private func labelGap(for layout: LaunchpadLayout) -> CGFloat {
