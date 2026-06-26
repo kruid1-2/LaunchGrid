@@ -1,3 +1,5 @@
+// LEGACY RUNTIME NOTE: This SwiftUI page type is not used by the visible launcher
+// paging surface. The active renderer is PagingSurfaceController + PageSurfaceView.
 import SwiftUI
 
 struct AppPageView: View {

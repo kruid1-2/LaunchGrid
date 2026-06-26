@@ -21,6 +21,10 @@ final class IconCache {
         fallbackImage
     }
 
+    func cachedIcon(forPath path: String) -> NSImage? {
+        cache.object(forKey: path as NSString)
+    }
+
     func loadIcon(for app: AppItem, completion: @escaping (NSImage) -> Void) {
         loadIcon(forPath: app.normalizedPath, completion: completion)
     }

@@ -795,3 +795,21 @@ At meaningful phase checkpoints, report:
 * Any environment or permission limitation
 
 Never hide an unresolved error and never describe an unverified feature as complete.
+
+## Active Paging Runtime (Important)
+
+The live launcher page renderer is:
+
+`LauncherPanel.sendEvent` → `PagingInputController` (`Window/PagingEventView.swift`) → `PagingSurfaceController` → `PageSurfaceView`.
+
+`LauncherView` only renders the background, search UI, status UI, an empty paging placeholder, and the page indicator.
+
+The following SwiftUI page types are legacy/reference code and are not used by the visible runtime paging surface:
+
+- `Views/AppGridView.swift`
+- `Views/AppIconView.swift`
+- `Views/AppPageView.swift`
+- `Views/AppPageHostingView.swift`
+- legacy animation methods in `PagerViewModel`
+
+Do not attempt to tune the live paging animation by editing those legacy paths. Motion changes must be made in `PagingSurfaceController`, `PagingGestureDriver`, or `PagingInputController`.

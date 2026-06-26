@@ -121,6 +121,33 @@ final class PagerViewModel: ObservableObject {
         }
     }
 
+    func beginSnapshotPageTransition() {
+        isPageTransitioning = true
+        pageOffset = 0
+    }
+
+    func completeSnapshotPageTransition(_ direction: PagingDirection) {
+        let targetPage = min(max(currentPage + direction.step, 0), pageCount - 1)
+        guard targetPage != currentPage else {
+            pageOffset = 0
+            isPageTransitioning = false
+            return
+        }
+
+        currentPage = targetPage
+        pageOffset = 0
+        isPageTransitioning = false
+    }
+
+    func completeSurfacePageTransition(_ direction: PagingDirection) {
+        let targetPage = min(max(currentPage + direction.step, 0), pageCount - 1)
+        guard targetPage != currentPage else {
+            return
+        }
+
+        currentPage = targetPage
+    }
+
     private func clampCurrentPage() {
         currentPage = min(max(currentPage, 0), max(pageCount - 1, 0))
     }

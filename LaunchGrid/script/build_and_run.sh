@@ -32,7 +32,7 @@ build_app() {
 
 stage_bundle() {
   local build_binary="$DERIVED_DATA/Build/Products/Debug/$APP_NAME.app"
-  local unsigned_bundle="$DIST_DIR/$APP_NAME-stage"
+  local unsigned_bundle="$DIST_DIR/$APP_NAME-stage.app"
 
   if [[ ! -d "$build_binary" ]]; then
     echo "Built binary not found at $build_binary" >&2

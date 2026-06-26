@@ -1,12 +1,23 @@
 import AppKit
 import SwiftUI
 
+@MainActor
 final class LauncherWindowController: NSWindowController, NSWindowDelegate {
     private let viewModel = LauncherViewModel()
     private let pager = PagerViewModel()
     private let iconCache = IconCache()
     private let pagingInputController = PagingInputController()
+    private let pagingSurfaceController = PagingSurfaceController()
     private var screenObserver: NSObjectProtocol?
+    private var pointerSequence: PointerSequence?
+
+    private struct PointerSequence {
+        let mouseDownLocation: CGPoint
+        let mouseDownWasInteractive: Bool
+        let mouseDownAppID: String?
+        var didMoveBeyondClickTolerance = false
+        var didPageDuringPointerSequence = false
+    }
 
     init() {
         let screen = MouseScreenResolver.currentMouseScreen()
@@ -18,8 +29,17 @@ final class LauncherWindowController: NSWindowController, NSWindowDelegate {
         panel.keyDownHandler = { [weak self] event in
             self?.handleKeyDown(event) ?? false
         }
+        panel.mouseEventHandler = { [weak self] event in
+            self?.handleMouseEvent(event) ?? false
+        }
+        panel.pointerPagingActivityHandler = { [weak self] in
+            self?.markPointerPagingActivity()
+        }
         panel.scrollWheelHandler = { [weak self] event in
             self?.pagingInputController.handleScrollWheel(event) ?? false
+        }
+        panel.swipeHandler = { [weak self] event in
+            self?.pagingInputController.handleSwipe(event) ?? false
         }
 
         let rootHostingView = LauncherRootHostingView(
@@ -29,12 +49,14 @@ final class LauncherWindowController: NSWindowController, NSWindowDelegate {
                 iconCache: iconCache,
                 onDismiss: { [weak self] in
                     self?.hideLauncher()
+                },
+                onPagerUpdated: { [weak self] in
+                    self?.refreshPagingSurface()
                 }
             )
         )
-        rootHostingView.onBackgroundClick = { [weak self] in
-            self?.hideLauncher()
-        }
+        rootHostingView.frame = panel.contentView?.bounds ?? panel.frame
+        rootHostingView.autoresizingMask = [.width, .height]
         panel.contentView = rootHostingView
 
         installScreenObserver()
@@ -46,6 +68,10 @@ final class LauncherWindowController: NSWindowController, NSWindowDelegate {
     }
 
     deinit {
+        let pagingSurfaceController = pagingSurfaceController
+        Task { @MainActor in
+            pagingSurfaceController.stopAndRelease()
+        }
         if let screenObserver {
             NotificationCenter.default.removeObserver(screenObserver)
         }
@@ -66,10 +92,12 @@ final class LauncherWindowController: NSWindowController, NSWindowDelegate {
         DispatchQueue.main.async {
             NotificationCenter.default.post(name: .launchGridFocusSearch, object: nil)
         }
+        refreshPagingSurface()
     }
 
     func hideLauncher() {
         pagingInputController.stop()
+        pagingSurfaceController.stopAndRelease()
         window?.orderOut(nil)
     }
 
@@ -89,14 +117,18 @@ final class LauncherWindowController: NSWindowController, NSWindowDelegate {
             }
 
             let screen = self.window?.screen ?? MouseScreenResolver.currentMouseScreen()
-            self.applyScreen(screen)
+            Task { @MainActor in
+                self.applyScreen(screen)
+            }
         }
     }
 
     private func applyScreen(_ screen: NSScreen) {
         window?.setFrame(screen.frame, display: true)
         viewModel.updateScreenLayout(screenFrame: screen.frame, visibleFrame: screen.visibleFrame)
+        pagingSurfaceController.invalidate(reason: "screen")
         configurePagingInput()
+        refreshPagingSurface()
     }
 
     private func configurePagingInput() {
@@ -107,31 +139,42 @@ final class LauncherWindowController: NSWindowController, NSWindowDelegate {
                 }
 
                 let layout = self.currentLayout()
+                let viewportWidth = max(1, self.currentPagingViewportFrame(layout: layout).width)
                 return PagingInputController.State(
                     currentPage: self.pager.currentPage,
                     pageCount: self.pager.pageCount,
-                    isTransitioning: self.pager.isPageTransitioning,
+                    isTransitioning: false,
                     threshold: layout.scrollThreshold,
-                    pageWidth: layout.pageWidth,
+                    pageWidth: viewportWidth,
                     animationDuration: layout.pageAnimationDuration
                 )
             },
-            onTrackOffset: { [weak self] offset in
-                self?.pager.setInteractiveOffset(offset)
+            onBegin: { [weak self] _, direction in
+                guard let self, let context = self.pagingSurfaceContext() else {
+                    return false
+                }
+
+                return self.pagingSurfaceController.beginGesture(context: context, destination: direction)
             },
-            onCommit: { [weak self] direction, duration in
+            onTrackOffset: { [weak self] offset in
+                self?.pagingSurfaceController.track(offset: offset)
+            },
+            onCommit: { [weak self] direction, duration, releaseVelocity in
                 guard let self else {
                     return
                 }
 
-                self.pager.stepPage(
-                    direction,
-                    pageWidth: self.currentLayout().pageWidth,
-                    animationDuration: duration
+                self.pagingSurfaceController.finish(
+                    direction: direction,
+                    duration: duration,
+                    releaseVelocity: releaseVelocity,
+                    commitPage: { [weak self] in
+                        self?.pager.completeSurfacePageTransition(direction)
+                    }
                 )
             },
-            onCancel: { [weak self] duration in
-                self?.pager.cancelDrag(animationDuration: duration)
+            onCancel: { [weak self] duration, releaseVelocity in
+                self?.pagingSurfaceController.cancel(duration: duration, releaseVelocity: releaseVelocity)
             }
         )
     }
@@ -139,6 +182,164 @@ final class LauncherWindowController: NSWindowController, NSWindowDelegate {
     private func currentLayout() -> LaunchpadLayout {
         let size = window?.frame.size ?? NSScreen.main?.frame.size ?? CGSize(width: 1024, height: 768)
         return LaunchpadMetrics.layout(for: size, screenInsets: viewModel.screenInsets)
+    }
+
+    private func pagingSurfaceContext() -> PagingSurfaceController.Context? {
+        guard let contentView = window?.contentView else {
+            return nil
+        }
+
+        let layout = currentLayout()
+        return PagingSurfaceController.Context(
+            contentView: contentView,
+            viewportFrame: currentPagingViewportFrame(layout: layout),
+            pages: pager.pages,
+            currentPage: pager.currentPage,
+            layout: layout,
+            iconCache: iconCache,
+            onLaunch: { [weak self] app in
+                guard let self, !self.pager.isInteractionLocked else {
+                    return
+                }
+
+                self.viewModel.launch(app) { [weak self] in
+                    self?.hideLauncher()
+                }
+            }
+        )
+    }
+
+    private func currentPagingViewportFrame(layout: LaunchpadLayout) -> CGRect {
+        guard let contentView = window?.contentView else {
+            return CGRect(origin: .zero, size: CGSize(width: layout.pageWidth, height: layout.gridHeight))
+        }
+
+        let x = layout.contentFrame.midX - layout.pageWidth / 2
+        let y = contentView.isFlipped
+            ? layout.gridTop
+            : contentView.bounds.height - layout.gridTop - layout.gridHeight
+        return CGRect(
+            x: x,
+            y: y,
+            width: layout.pageWidth,
+            height: layout.gridHeight
+        )
+    }
+
+    private func refreshPagingSurface() {
+        guard window?.isVisible == true, let context = pagingSurfaceContext() else {
+            return
+        }
+
+        pagingSurfaceController.installOrUpdate(context: context)
+    }
+
+    private func handleMouseEvent(_ event: NSEvent) -> Bool {
+        guard window?.isVisible == true, NSApp.isActive, let contentView = window?.contentView else {
+            return false
+        }
+
+        switch event.type {
+        case .leftMouseDown:
+            let mouseDownApp = pagingSurfaceController.appItem(atWindowPoint: event.locationInWindow)
+            pointerSequence = PointerSequence(
+                mouseDownLocation: event.locationInWindow,
+                mouseDownWasInteractive: mouseDownApp != nil
+                    || isNonAppInteractiveWindowPoint(event.locationInWindow, contentView: contentView),
+                mouseDownAppID: mouseDownApp?.id
+            )
+            return false
+        case .leftMouseDragged:
+            guard var sequence = pointerSequence else {
+                return false
+            }
+
+            let distance = hypot(
+                event.locationInWindow.x - sequence.mouseDownLocation.x,
+                event.locationInWindow.y - sequence.mouseDownLocation.y
+            )
+            if distance > 5 {
+                sequence.didMoveBeyondClickTolerance = true
+                pointerSequence = sequence
+            }
+            return false
+        case .leftMouseUp:
+            guard let sequence = pointerSequence else {
+                return false
+            }
+
+            pointerSequence = nil
+            let upLocation = event.locationInWindow
+            let upDistance = hypot(
+                upLocation.x - sequence.mouseDownLocation.x,
+                upLocation.y - sequence.mouseDownLocation.y
+            )
+            guard upDistance <= 5,
+                  !sequence.didMoveBeyondClickTolerance,
+                  !sequence.didPageDuringPointerSequence else {
+                return false
+            }
+
+            if let mouseDownAppID = sequence.mouseDownAppID,
+               let mouseUpApp = pagingSurfaceController.appItem(atWindowPoint: upLocation),
+               mouseUpApp.id == mouseDownAppID {
+                pagingSurfaceController.cancelPointerInteraction()
+                viewModel.launch(mouseUpApp) { [weak self] in
+                    self?.hideLauncher()
+                }
+                return true
+            }
+
+            guard !sequence.mouseDownWasInteractive,
+                  !isNonAppInteractiveWindowPoint(upLocation, contentView: contentView),
+                  pagingSurfaceController.appItem(atWindowPoint: upLocation) == nil else {
+                return false
+            }
+
+            pagingSurfaceController.cancelPointerInteraction()
+            hideLauncher()
+            return true
+        default:
+            return false
+        }
+    }
+
+    private func markPointerPagingActivity() {
+        guard var sequence = pointerSequence else {
+            return
+        }
+
+        sequence.didPageDuringPointerSequence = true
+        pointerSequence = sequence
+    }
+
+    private func isNonAppInteractiveWindowPoint(_ location: CGPoint, contentView: NSView) -> Bool {
+        let windowPoint = CGPoint(x: location.x, y: location.y)
+        let flippedPoint = CGPoint(
+            x: location.x,
+            y: contentView.bounds.height - location.y
+        )
+        let layout = currentLayout()
+        let contentCenterX = layout.contentFrame.midX
+
+        let searchTop = layout.contentFrame.minY + layout.topPadding
+        let searchFrame = CGRect(
+            x: contentCenterX - layout.searchWidth / 2,
+            y: searchTop,
+            width: layout.searchWidth,
+            height: layout.searchHeight
+        ).insetBy(dx: -12, dy: -10)
+
+        let pageIndicatorFrame = CGRect(
+            x: contentCenterX - 90,
+            y: layout.pageIndicatorCenterY - 26,
+            width: 180,
+            height: 52
+        )
+
+        let candidatePoints = [flippedPoint, windowPoint]
+        return candidatePoints.contains(where: { searchFrame.contains($0) })
+            || candidatePoints.contains(where: { pageIndicatorFrame.contains($0) })
     }
 
     private func handleKeyDown(_ event: NSEvent) -> Bool {

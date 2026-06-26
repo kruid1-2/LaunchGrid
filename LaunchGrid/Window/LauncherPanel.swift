@@ -2,7 +2,10 @@ import AppKit
 
 final class LauncherPanel: NSPanel {
     var keyDownHandler: ((NSEvent) -> Bool)?
+    var mouseEventHandler: ((NSEvent) -> Bool)?
     var scrollWheelHandler: ((NSEvent) -> Bool)?
+    var swipeHandler: ((NSEvent) -> Bool)?
+    var pointerPagingActivityHandler: (() -> Void)?
 
     init(frame: NSRect) {
         super.init(
@@ -16,10 +19,16 @@ final class LauncherPanel: NSPanel {
         title = "LaunchGrid"
         titleVisibility = .hidden
         titlebarAppearsTransparent = true
+
+        // Keep the launcher visually translucent, but avoid a fully transparent
+        // window backing. A completely clear borderless panel can allow blank
+        // regions to fall out of the normal event target path on macOS.
         isOpaque = false
-        backgroundColor = .clear
+        backgroundColor = NSColor.black.withAlphaComponent(0.001)
         hasShadow = false
         hidesOnDeactivate = false
+        ignoresMouseEvents = false
+        acceptsMouseMovedEvents = true
         isMovable = false
         level = .normal
         collectionBehavior = [
@@ -43,14 +52,33 @@ final class LauncherPanel: NSPanel {
     }
 
     override func sendEvent(_ event: NSEvent) {
-        if event.type == .scrollWheel, scrollWheelHandler?(event) == true {
-            return
-        }
-
-        if event.type == .keyDown, keyDownHandler?(event) == true {
-            return
+        switch event.type {
+        case .scrollWheel:
+            // This method is already running on the launcher panel, so the
+            // downstream handler must not reject the event merely because
+            // event.window is temporarily nil during a gesture phase.
+            if scrollWheelHandler?(event) == true {
+                pointerPagingActivityHandler?()
+                return
+            }
+        case .swipe:
+            if swipeHandler?(event) == true {
+                pointerPagingActivityHandler?()
+                return
+            }
+        case .keyDown:
+            if keyDownHandler?(event) == true {
+                return
+            }
+        case .leftMouseDown, .leftMouseDragged, .leftMouseUp:
+            if mouseEventHandler?(event) == true {
+                return
+            }
+        default:
+            break
         }
 
         super.sendEvent(event)
     }
+
 }

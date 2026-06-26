@@ -26,6 +26,11 @@
 		000000000000000000000117 /* AppPageView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000018 /* AppPageView.swift */; };
 		000000000000000000000118 /* PageIndicatorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000019 /* PageIndicatorView.swift */; };
 		000000000000000000000119 /* LauncherRootHostingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000020 /* LauncherRootHostingView.swift */; };
+		000000000000000000000121 /* AppPageHostingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000022 /* AppPageHostingView.swift */; };
+		000000000000000000000122 /* PagingSurfaceController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000023 /* PagingSurfaceController.swift */; };
+		000000000000000000000123 /* PageSurfaceView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000024 /* PageSurfaceView.swift */; };
+		000000000000000000000124 /* PageSurfaceCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000025 /* PageSurfaceCache.swift */; };
+		000000000000000000000125 /* PagingGestureDriver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000026 /* PagingGestureDriver.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -49,6 +54,11 @@
 		000000000000000000000018 /* AppPageView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppPageView.swift; sourceTree = "<group>"; };
 		000000000000000000000019 /* PageIndicatorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PageIndicatorView.swift; sourceTree = "<group>"; };
 		000000000000000000000020 /* LauncherRootHostingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LauncherRootHostingView.swift; sourceTree = "<group>"; };
+		000000000000000000000022 /* AppPageHostingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppPageHostingView.swift; sourceTree = "<group>"; };
+		000000000000000000000023 /* PagingSurfaceController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PagingSurfaceController.swift; sourceTree = "<group>"; };
+		000000000000000000000024 /* PageSurfaceView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PageSurfaceView.swift; sourceTree = "<group>"; };
+		000000000000000000000025 /* PageSurfaceCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PageSurfaceCache.swift; sourceTree = "<group>"; };
+		000000000000000000000026 /* PagingGestureDriver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PagingGestureDriver.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -71,6 +81,7 @@
 				000000000000000000000303 /* Services */,
 				000000000000000000000304 /* ViewModels */,
 				000000000000000000000305 /* Window */,
+				000000000000000000000309 /* Paging */,
 				000000000000000000000306 /* Views */,
 				000000000000000000000308 /* Design */,
 				000000000000000000000307 /* Products */,
@@ -121,6 +132,7 @@
 				000000000000000000000010 /* LauncherView.swift */,
 				000000000000000000000011 /* AppGridView.swift */,
 				000000000000000000000018 /* AppPageView.swift */,
+				000000000000000000000022 /* AppPageHostingView.swift */,
 				000000000000000000000012 /* AppIconView.swift */,
 				000000000000000000000019 /* PageIndicatorView.swift */,
 				000000000000000000000013 /* SearchBarView.swift */,
@@ -142,6 +154,17 @@
 				000000000000000000000015 /* LaunchpadMetrics.swift */,
 			);
 			path = Design;
+			sourceTree = "<group>";
+		};
+		000000000000000000000309 /* Paging */ = {
+			isa = PBXGroup;
+			children = (
+				000000000000000000000023 /* PagingSurfaceController.swift */,
+				000000000000000000000024 /* PageSurfaceView.swift */,
+				000000000000000000000025 /* PageSurfaceCache.swift */,
+				000000000000000000000026 /* PagingGestureDriver.swift */,
+			);
+			path = Paging;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -224,10 +247,15 @@
 				000000000000000000000109 /* LauncherWindowController.swift in Sources */,
 				000000000000000000000119 /* LauncherRootHostingView.swift in Sources */,
 				000000000000000000000116 /* PagingEventView.swift in Sources */,
+				000000000000000000000122 /* PagingSurfaceController.swift in Sources */,
+				000000000000000000000123 /* PageSurfaceView.swift in Sources */,
+				000000000000000000000124 /* PageSurfaceCache.swift in Sources */,
+				000000000000000000000125 /* PagingGestureDriver.swift in Sources */,
 				000000000000000000000114 /* LaunchpadMetrics.swift in Sources */,
 				000000000000000000000110 /* LauncherView.swift in Sources */,
 				000000000000000000000111 /* AppGridView.swift in Sources */,
 				000000000000000000000117 /* AppPageView.swift in Sources */,
+				000000000000000000000121 /* AppPageHostingView.swift in Sources */,
 				000000000000000000000112 /* AppIconView.swift in Sources */,
 				000000000000000000000118 /* PageIndicatorView.swift in Sources */,
 				000000000000000000000113 /* SearchBarView.swift in Sources */,

@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 struct LauncherView: View {
@@ -6,6 +7,7 @@ struct LauncherView: View {
 
     let iconCache: IconCache
     let onDismiss: () -> Void
+    let onPagerUpdated: () -> Void
 
     var body: some View {
         GeometryReader { geometry in
@@ -14,7 +16,6 @@ struct LauncherView: View {
                 screenInsets: viewModel.screenInsets
             )
             let contentCenterX = layout.contentFrame.midX
-            let debugWidth = min(max(1, layout.contentFrame.width - 32), 430)
 
             ZStack {
                 Rectangle()
@@ -52,73 +53,37 @@ struct LauncherView: View {
                     currentPage: pager.currentPage,
                     layout: layout
                 )
+                .allowsHitTesting(false)
                 .position(
                     x: contentCenterX,
                     y: layout.pageIndicatorCenterY
                 )
-
-                pagingDebugOverlay(layout: layout)
-                    .frame(width: debugWidth, alignment: .leading)
-                    .position(
-                        x: layout.contentFrame.minX + 16 + debugWidth / 2,
-                        y: layout.contentFrame.minY + 72
-                    )
-
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
             .onAppear {
-                updatePager(layout: layout)
-                preloadIcons(layout: layout)
+                refreshPager(layout: layout)
             }
             .onChange(of: viewModel.apps) { _ in
-                updatePager(layout: layout)
-                preloadIcons(layout: layout)
+                refreshPager(layout: layout)
             }
             .onChange(of: viewModel.searchText) { _ in
-                updatePager(layout: layout)
-                preloadIcons(layout: layout)
+                refreshPager(layout: layout)
             }
             .onChange(of: layout.pageCapacity) { _ in
-                updatePager(layout: layout)
-                preloadIcons(layout: layout)
+                refreshPager(layout: layout)
             }
             .onChange(of: viewModel.screenInsets) { _ in
-                updatePager(layout: layout)
-                preloadIcons(layout: layout)
-            }
-            .onChange(of: pager.currentPage) { _ in
-                preloadIcons(layout: layout)
+                refreshPager(layout: layout)
             }
         }
         .preferredColorScheme(.dark)
     }
 
+    @ViewBuilder
     private func pageContainer(layout: LaunchpadLayout) -> some View {
-        HStack(spacing: 0) {
-            ForEach([pager.currentPage - 1, pager.currentPage, pager.currentPage + 1], id: \.self) { pageIndex in
-                if let apps = appsForPage(pageIndex) {
-                    AppPageView(
-                        apps: apps,
-                        layout: layout,
-                        iconCache: iconCache,
-                        canLaunchApps: !pager.isInteractionLocked,
-                        onLaunch: { app in
-                            guard !pager.isInteractionLocked else {
-                                return
-                            }
-
-                            viewModel.launch(app, onSuccess: onDismiss)
-                        }
-                    )
-                } else {
-                    Color.clear
-                        .frame(width: layout.pageWidth, height: layout.gridHeight)
-                }
-            }
-        }
-        .frame(width: layout.pageWidth * 3, height: layout.gridHeight, alignment: .leading)
-        .offset(x: -layout.pageWidth + pager.pageOffset)
-        .frame(width: layout.pageWidth, height: layout.gridHeight)
-        .clipped()
+        Color.clear
+            .frame(width: layout.pageWidth, height: layout.gridHeight)
+            .allowsHitTesting(false)
     }
 
     private func appsForPage(_ pageIndex: Int) -> [AppItem]? {
@@ -127,23 +92,6 @@ struct LauncherView: View {
         }
 
         return pager.pages[pageIndex]
-    }
-
-    private func pagingDebugOverlay(layout: LaunchpadLayout) -> some View {
-        let currentPageItems = pager.pages[safe: pager.currentPage]?.count ?? 0
-        let text = "page \(pager.currentPage + 1)/\(pager.pageCount)  offset \(Int(pager.pageOffset))  apps \(currentPageItems)/\(pager.filteredCount)  cap \(layout.pageCapacity)"
-
-        return Text(text)
-            .font(.system(size: 12, weight: .semibold, design: .monospaced))
-            .foregroundStyle(.white)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .background(.black.opacity(0.48), in: Capsule())
-            .overlay(
-                Capsule()
-                    .stroke(.white.opacity(0.24), lineWidth: 1)
-            )
-            .allowsHitTesting(false)
     }
 
     @ViewBuilder
@@ -173,6 +121,12 @@ struct LauncherView: View {
             searchText: viewModel.searchText,
             pageCapacity: layout.pageCapacity
         )
+    }
+
+    private func refreshPager(layout: LaunchpadLayout) {
+        updatePager(layout: layout)
+        preloadIcons(layout: layout)
+        onPagerUpdated()
     }
 
     private func preloadIcons(layout: LaunchpadLayout) {
