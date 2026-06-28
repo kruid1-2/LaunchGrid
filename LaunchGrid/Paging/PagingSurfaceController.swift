@@ -65,11 +65,7 @@ final class PagingSurfaceController {
     private let minSettleDuration: TimeInterval = 0.12
     private let maxSettleDuration: TimeInterval = 0.24
     private let debugMotionEnabled = ProcessInfo.processInfo.environment["LAUNCHGRID_DEBUG_MOTION"] == "1"
-    #if DEBUG
-    private let debugSurfaceBordersEnabled = ProcessInfo.processInfo.environment["LAUNCHGRID_DEBUG_SURFACES"] != "0"
-    #else
     private let debugSurfaceBordersEnabled = ProcessInfo.processInfo.environment["LAUNCHGRID_DEBUG_SURFACES"] == "1"
-    #endif
     private let debugSurfaceProbeEnabled = ProcessInfo.processInfo.environment["LAUNCHGRID_DEBUG_SURFACE_PROBE"] == "1"
     private var debugSurfaceProbeRan = false
     private var motionSessionID = 0

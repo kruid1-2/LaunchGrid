@@ -16,6 +16,7 @@ final class PageSurfaceView: NSView {
     private var onLaunch: ((AppItem) -> Void)?
     private var displayRefreshScheduled = false
     private(set) var isPagingLocked = false
+    private var surfaceRefreshNeeded = false
     private var renderedGeneration = Int.min
     private var isRenderingSurfaceCache = false
     private var debugOverlayText: String?
@@ -113,7 +114,15 @@ final class PageSurfaceView: NSView {
         }
 
         isPagingLocked = locked
-        markNeedsSurfaceRefresh()
+        if !locked, surfaceRefreshNeeded {
+            DispatchQueue.main.async { [weak self] in
+                guard let self, !self.isPagingLocked, self.surfaceRefreshNeeded else {
+                    return
+                }
+
+                self.forceRenderIfNeeded()
+            }
+        }
     }
 
     func setDebugOverlay(_ text: String?) {
@@ -130,7 +139,7 @@ final class PageSurfaceView: NSView {
     }
 
     var hasPendingDisplayRefresh: Bool {
-        displayRefreshScheduled
+        displayRefreshScheduled || surfaceRefreshNeeded
     }
 
     override func updateTrackingAreas() {
@@ -181,8 +190,13 @@ final class PageSurfaceView: NSView {
     }
 
     func forceRenderIfNeeded() {
+        guard surfaceRefreshNeeded || renderedGeneration != generation || contentLayer.contents == nil else {
+            return
+        }
+
         guard !isPagingLocked else {
             needsDisplay = true
+            surfaceRefreshNeeded = true
             return
         }
 
@@ -225,6 +239,7 @@ final class PageSurfaceView: NSView {
         contentLayer.contents = bitmapContext.makeImage()
         contentLayer.contentsScale = scale
         renderedGeneration = generation
+        surfaceRefreshNeeded = false
         needsDisplay = false
     }
 
@@ -486,6 +501,7 @@ final class PageSurfaceView: NSView {
     }
 
     private func markNeedsSurfaceRefresh() {
+        surfaceRefreshNeeded = true
         needsDisplay = true
         guard window != nil else {
             return
