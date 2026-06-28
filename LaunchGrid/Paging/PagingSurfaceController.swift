@@ -350,7 +350,12 @@ final class PagingSurfaceController {
         containerView.frame = context.viewportFrame.integral
         containerView.layer?.masksToBounds = true
         containerView.layer?.zPosition = 900
-        transitionView.frame = CGRect(origin: .zero, size: CGSize(width: pageWidth, height: pageHeight))
+        transitionView.frame = CGRect(
+            x: -pageWidth,
+            y: 0,
+            width: pageWidth * 3,
+            height: pageHeight
+        )
         transitionView.layer?.transform = CATransform3DMakeTranslation(currentTranslation, 0, 0)
         if debugMotionEnabled {
             motionDebugLabel.frame = CGRect(x: 18, y: 18, width: 360, height: 64)
@@ -528,12 +533,13 @@ final class PagingSurfaceController {
             generation: generation,
             onLaunch: onLaunch
         )
+        surface.forceRenderIfNeeded()
     }
 
     private func layoutSurfaceFrames(pageHeight: CGFloat) {
-        previousSurface.frame = CGRect(x: -pageWidth, y: 0, width: pageWidth, height: pageHeight)
-        currentSurface.frame = CGRect(x: 0, y: 0, width: pageWidth, height: pageHeight)
-        nextSurface.frame = CGRect(x: pageWidth, y: 0, width: pageWidth, height: pageHeight)
+        previousSurface.frame = CGRect(x: 0, y: 0, width: pageWidth, height: pageHeight)
+        currentSurface.frame = CGRect(x: pageWidth, y: 0, width: pageWidth, height: pageHeight)
+        nextSurface.frame = CGRect(x: pageWidth * 2, y: 0, width: pageWidth, height: pageHeight)
         updateDebugSurfaceVisuals()
     }
 
@@ -846,20 +852,23 @@ final class PagingSurfaceController {
         }
 
         let surface = destinationSurface(for: direction)
-        let expectedX = direction == .next ? pageWidth : -pageWidth
+        let expectedAppCount = pages[targetPage].count
+        let expectedX = direction == .next ? pageWidth * 2 : 0
         let frameError = abs(surface.frame.minX - expectedX)
             + abs(surface.frame.width - pageWidth)
             + abs(surface.frame.height - transitionView.bounds.height)
         let layerOpacity = surface.layer?.opacity ?? 1
         let ready = surface.pageIndex == targetPage
+            && surface.appCount == expectedAppCount
             && surface.hasDrawableContent
+            && surface.hasRenderedCurrentGeneration
             && !surface.isHidden
             && surface.alphaValue == 1
             && abs(layerOpacity - 1) < 0.001
             && frameError < 0.5
 
         logger.notice(
-            "Surface destination validation direction=\(direction.rawValue, privacy: .public) ready=\(ready) targetPage=\(targetPage) surfacePage=\(surface.pageIndex) hidden=\(surface.isHidden) alpha=\(surface.alphaValue) opacity=\(layerOpacity) frameError=\(frameError)"
+            "Surface destination validation direction=\(direction.rawValue, privacy: .public) ready=\(ready) targetPage=\(targetPage) surfacePage=\(surface.pageIndex) apps=\(surface.appCount) expectedApps=\(expectedAppCount) rendered=\(surface.hasRenderedCurrentGeneration) hidden=\(surface.isHidden) alpha=\(surface.alphaValue) opacity=\(layerOpacity) frameError=\(frameError)"
         )
         return ready
     }
@@ -909,7 +918,16 @@ final class PagingSurfaceController {
 
         previousSurface.setDebugBorder(.systemBlue)
         currentSurface.setDebugBorder(.systemRed)
-        nextSurface.setDebugBorder(.systemGreen)
+        nextSurface.setDebugBorder(.systemBlue)
+
+        switch activeDestination {
+        case .previous:
+            previousSurface.setDebugBorder(.systemGreen)
+        case .next:
+            nextSurface.setDebugBorder(.systemGreen)
+        case nil:
+            nextSurface.setDebugBorder(.systemGreen)
+        }
         previousSurface.setDebugOverlay(debugOverlay(role: "previous", surface: previousSurface))
         currentSurface.setDebugOverlay(debugOverlay(role: "current", surface: currentSurface))
         nextSurface.setDebugOverlay(debugOverlay(role: "next", surface: nextSurface))
@@ -917,12 +935,13 @@ final class PagingSurfaceController {
 
     private func debugOverlay(role: String, surface: PageSurfaceView) -> String {
         let readiness = surface.hasDrawableContent ? "ready" : "empty"
+        let rendered = surface.hasRenderedCurrentGeneration ? "drawn" : "not-drawn"
         let visibility = isFullyOffscreen(surface: surface) ? "offscreen" : "visible"
         let lock = surface.isPagingLocked ? "locked" : "free"
         let pending = surface.hasPendingDisplayRefresh ? "pending" : "idle"
         return """
         \(role) p=\(surface.pageIndex) \(shortSurfaceID(surface))
-        apps=\(surface.appCount) gen=\(surface.generation) \(readiness)
+        apps=\(surface.appCount) gen=\(surface.generation) \(readiness) \(rendered)
         \(lock) \(visibility) reload=\(pending)
         """
     }
@@ -947,7 +966,7 @@ final class PagingSurfaceController {
 
     private func visibleFrame(surface: PageSurfaceView, translation: CGFloat) -> CGRect {
         surface.frame.offsetBy(
-            dx: containerView.frame.minX + translation,
+            dx: containerView.frame.minX + transitionView.frame.minX + translation,
             dy: containerView.frame.minY
         )
     }
@@ -1040,7 +1059,7 @@ final class PagingSurfaceController {
     private func surfaceState(_ surface: PageSurfaceView) -> String {
         let opacity = surface.layer?.opacity ?? 1
         let visibility = isFullyOffscreen(surface: surface) ? "offscreen" : "visible"
-        return "role=\(roleName(for: surface)) id=\(surfaceID(surface)) page=\(surface.pageIndex) apps=\(surface.appCount) gen=\(surface.generation) frame=\(surface.frame.debugDescription) hidden=\(surface.isHidden) alpha=\(surface.alphaValue) opacity=\(opacity) \(visibility) locked=\(surface.isPagingLocked) pendingDisplay=\(surface.hasPendingDisplayRefresh)"
+        return "role=\(roleName(for: surface)) id=\(surfaceID(surface)) page=\(surface.pageIndex) apps=\(surface.appCount) gen=\(surface.generation) rendered=\(surface.hasRenderedCurrentGeneration) frame=\(surface.frame.debugDescription) hidden=\(surface.isHidden) alpha=\(surface.alphaValue) opacity=\(opacity) \(visibility) locked=\(surface.isPagingLocked) pendingDisplay=\(surface.hasPendingDisplayRefresh)"
     }
 
     private func milliseconds(_ duration: Duration) -> Double {

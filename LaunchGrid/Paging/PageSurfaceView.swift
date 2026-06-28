@@ -2,6 +2,7 @@ import AppKit
 
 @MainActor
 final class PageSurfaceView: NSView {
+    private let contentLayer = CALayer()
     private var apps: [AppItem] = []
     private var layout: LaunchpadLayout?
     private weak var iconCache: IconCache?
@@ -15,6 +16,8 @@ final class PageSurfaceView: NSView {
     private var onLaunch: ((AppItem) -> Void)?
     private var displayRefreshScheduled = false
     private(set) var isPagingLocked = false
+    private var renderedGeneration = Int.min
+    private var isRenderingSurfaceCache = false
     private var debugOverlayText: String?
 
     private let labelParagraphStyle: NSParagraphStyle = {
@@ -28,6 +31,15 @@ final class PageSurfaceView: NSView {
         super.init(frame: frameRect)
         wantsLayer = true
         layer?.masksToBounds = false
+        contentLayer.masksToBounds = false
+        contentLayer.contentsGravity = .resize
+        contentLayer.actions = [
+            "bounds": NSNull(),
+            "contents": NSNull(),
+            "frame": NSNull(),
+            "position": NSNull()
+        ]
+        layer?.addSublayer(contentLayer)
     }
 
     @available(*, unavailable)
@@ -60,6 +72,7 @@ final class PageSurfaceView: NSView {
         self.layout = layout
         self.iconCache = iconCache
         self.generation = generation
+        renderedGeneration = Int.min
         self.hoveredIndex = nil
         self.pressedIndex = nil
         self.mouseDownPoint = nil
@@ -69,11 +82,15 @@ final class PageSurfaceView: NSView {
         let validPaths = Set(apps.map(\.normalizedPath))
         iconImages = iconImages.filter { validPaths.contains($0.key) }
         requestMissingIcons(iconCache: iconCache, generation: generation)
-        needsDisplay = true
+        markNeedsSurfaceRefresh()
     }
 
     var hasDrawableContent: Bool {
         layout != nil
+    }
+
+    var hasRenderedCurrentGeneration: Bool {
+        renderedGeneration == generation
     }
 
     func setDebugBorder(_ color: NSColor?) {
@@ -96,7 +113,7 @@ final class PageSurfaceView: NSView {
         }
 
         isPagingLocked = locked
-        needsDisplay = true
+        markNeedsSurfaceRefresh()
     }
 
     func setDebugOverlay(_ text: String?) {
@@ -105,7 +122,7 @@ final class PageSurfaceView: NSView {
         }
 
         debugOverlayText = text
-        needsDisplay = true
+        markNeedsSurfaceRefresh()
     }
 
     var appCount: Int {
@@ -134,6 +151,14 @@ final class PageSurfaceView: NSView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
+        guard isRenderingSurfaceCache else {
+            return
+        }
+
+        drawSurface(in: dirtyRect)
+    }
+
+    private func drawSurface(in dirtyRect: NSRect) {
         NSColor.clear.setFill()
         dirtyRect.fill()
 
@@ -143,6 +168,7 @@ final class PageSurfaceView: NSView {
 
         guard !apps.isEmpty else {
             drawEmptyState(layout: layout)
+            renderedGeneration = generation
             return
         }
 
@@ -151,13 +177,62 @@ final class PageSurfaceView: NSView {
             drawApp(at: index, layout: layout)
         }
         drawDebugOverlayIfNeeded()
+        renderedGeneration = generation
+    }
+
+    func forceRenderIfNeeded() {
+        guard !isPagingLocked else {
+            needsDisplay = true
+            return
+        }
+
+        layoutSubtreeIfNeeded()
+        contentLayer.frame = bounds
+        guard bounds.width > 1, bounds.height > 1 else {
+            displayIfNeeded()
+            layer?.displayIfNeeded()
+            return
+        }
+
+        let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
+        let pixelWidth = max(1, Int(ceil(bounds.width * scale)))
+        let pixelHeight = max(1, Int(ceil(bounds.height * scale)))
+        let bitmapInfo = CGImageAlphaInfo.premultipliedLast.rawValue
+        guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
+              let bitmapContext = CGContext(
+                  data: nil,
+                  width: pixelWidth,
+                  height: pixelHeight,
+                  bitsPerComponent: 8,
+                  bytesPerRow: 0,
+                  space: colorSpace,
+                  bitmapInfo: bitmapInfo
+              ) else {
+            displayIfNeeded()
+            layer?.displayIfNeeded()
+            return
+        }
+
+        bitmapContext.translateBy(x: 0, y: CGFloat(pixelHeight))
+        bitmapContext.scaleBy(x: scale, y: -scale)
+        let previousContext = NSGraphicsContext.current
+        NSGraphicsContext.current = NSGraphicsContext(cgContext: bitmapContext, flipped: true)
+        isRenderingSurfaceCache = true
+        drawSurface(in: bounds)
+        isRenderingSurfaceCache = false
+        NSGraphicsContext.current = previousContext
+
+        contentLayer.contents = bitmapContext.makeImage()
+        contentLayer.contentsScale = scale
+        renderedGeneration = generation
+        needsDisplay = false
     }
 
     override func mouseMoved(with event: NSEvent) {
         let index = hitIndex(at: convert(event.locationInWindow, from: nil))
         if hoveredIndex != index {
             hoveredIndex = index
-            needsDisplay = true
+            markNeedsSurfaceRefresh()
         }
     }
 
@@ -165,7 +240,7 @@ final class PageSurfaceView: NSView {
         if hoveredIndex != nil || pressedIndex != nil {
             hoveredIndex = nil
             pressedIndex = nil
-            needsDisplay = true
+            markNeedsSurfaceRefresh()
         }
     }
 
@@ -173,7 +248,7 @@ final class PageSurfaceView: NSView {
         let point = convert(event.locationInWindow, from: nil)
         mouseDownPoint = point
         pressedIndex = hitIndex(at: point)
-        needsDisplay = true
+        markNeedsSurfaceRefresh()
     }
 
     override func mouseDragged(with event: NSEvent) {
@@ -186,7 +261,7 @@ final class PageSurfaceView: NSView {
         let nextPressedIndex = distance <= layout.clickCancelDistance ? hitIndex(at: point) : nil
         if pressedIndex != nextPressedIndex {
             pressedIndex = nextPressedIndex
-            needsDisplay = true
+            markNeedsSurfaceRefresh()
         }
     }
 
@@ -194,7 +269,7 @@ final class PageSurfaceView: NSView {
         defer {
             pressedIndex = nil
             mouseDownPoint = nil
-            needsDisplay = true
+            markNeedsSurfaceRefresh()
         }
 
         let point = convert(event.locationInWindow, from: nil)
@@ -214,7 +289,7 @@ final class PageSurfaceView: NSView {
 
         pressedIndex = nil
         mouseDownPoint = nil
-        needsDisplay = true
+        markNeedsSurfaceRefresh()
     }
 
     func app(atLocalPoint point: CGPoint) -> AppItem? {
@@ -406,8 +481,17 @@ final class PageSurfaceView: NSView {
                 return
             }
 
-            self.needsDisplay = true
+            self.markNeedsSurfaceRefresh()
         }
+    }
+
+    private func markNeedsSurfaceRefresh() {
+        needsDisplay = true
+        guard window != nil else {
+            return
+        }
+
+        forceRenderIfNeeded()
     }
 
     private func hitIndex(at point: CGPoint) -> Int? {
