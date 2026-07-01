@@ -55,7 +55,10 @@ final class PagingSurfaceController {
     private var gestureStartTranslation: CGFloat = 0
     private var isSettling = false
     private var settleGeneration = 0
+    private var activeSettleCompletion: SettleCompletion?
     private var transitionSessionID: UInt64 = 0
+    private var offscreenRefreshToken: UInt64 = 0
+    private var scheduledOffscreenRefresh: DispatchWorkItem?
     private var activeDestination: PagingDirection?
     private var activeTransition: ActivePagingTransition?
     private let motionResponseTime: TimeInterval = 0.008
@@ -64,6 +67,7 @@ final class PagingSurfaceController {
     private let springDamping: CGFloat = 39
     private let minSettleDuration: TimeInterval = 0.12
     private let maxSettleDuration: TimeInterval = 0.24
+    private let offscreenRefreshDelay: TimeInterval = 0.05
     private let debugMotionEnabled = ProcessInfo.processInfo.environment["LAUNCHGRID_DEBUG_MOTION"] == "1"
     private let debugSurfaceBordersEnabled = ProcessInfo.processInfo.environment["LAUNCHGRID_DEBUG_SURFACES"] == "1"
     private let debugSurfaceProbeEnabled = ProcessInfo.processInfo.environment["LAUNCHGRID_DEBUG_SURFACE_PROBE"] == "1"
@@ -93,6 +97,17 @@ final class PagingSurfaceController {
             let id = ObjectIdentifier(surface)
             return id == sourceSurfaceID || id == destinationSurfaceID
         }
+    }
+
+    private struct OffscreenRefreshRequest {
+        var token: UInt64
+        let direction: PagingDirection
+        let targetPage: Int
+        let requestedPage: Int
+        let expectedRole: String
+        let layout: LaunchpadLayout
+        let iconCache: IconCache
+        let onLaunch: (AppItem) -> Void
     }
 
     private enum SettleCompletion {
@@ -310,6 +325,8 @@ final class PagingSurfaceController {
         logger.notice("Surface invalidated reason=\(reason)")
         signature = nil
         settleGeneration += 1
+        activeSettleCompletion = nil
+        cancelScheduledOffscreenRefresh(reason: "invalidate")
         clearActiveTransition()
         stopSettleDebugSampling()
         transitionView.layer?.removeAllAnimations()
@@ -320,6 +337,8 @@ final class PagingSurfaceController {
     func stopAndRelease() {
         driver.stop()
         settleGeneration += 1
+        activeSettleCompletion = nil
+        cancelScheduledOffscreenRefresh(reason: "stop")
         stopSettleDebugSampling()
         transitionView.layer?.removeAllAnimations()
         applyTranslation(0, alignToPixel: true)
@@ -394,6 +413,7 @@ final class PagingSurfaceController {
 
     private func beginActiveTransition(direction: PagingDirection) {
         clearActiveTransition()
+        cancelScheduledOffscreenRefresh(reason: "begin-transition")
         transitionSessionID += 1
 
         let source = currentSurface
@@ -448,7 +468,8 @@ final class PagingSurfaceController {
         targetPage: Int,
         layout: LaunchpadLayout,
         iconCache: IconCache,
-        onLaunch: @escaping (AppItem) -> Void
+        onLaunch: @escaping (AppItem) -> Void,
+        token: UInt64
     ) {
         let refreshStart = ContinuousClock.now
         let surface: PageSurfaceView
@@ -467,14 +488,14 @@ final class PagingSurfaceController {
 
         guard canRefreshOffscreen(surface: surface, expectedRole: role) else {
             logger.fault(
-                "Surface offscreen refresh rejected role=\(role, privacy: .public) requestedPage=\(pageIndex) state=\(self.surfaceState(surface), privacy: .public) transition=\(self.activeTransitionDescription, privacy: .public)"
+                "Surface offscreen refresh rejected token=\(token) role=\(role, privacy: .public) requestedPage=\(pageIndex) state=\(self.surfaceState(surface), privacy: .public) transition=\(self.activeTransitionDescription, privacy: .public)"
             )
             return
         }
 
         let generation = cache.nextGeneration()
         logger.notice(
-            "Surface offscreen refresh began role=\(role, privacy: .public) requestedPage=\(pageIndex) generation=\(generation) state=\(self.surfaceState(surface), privacy: .public)"
+            "Surface offscreen refresh began token=\(token) role=\(role, privacy: .public) requestedPage=\(pageIndex) generation=\(generation) state=\(self.surfaceState(surface), privacy: .public)"
         )
         configure(
             surface: surface,
@@ -486,7 +507,88 @@ final class PagingSurfaceController {
         )
         let elapsed = milliseconds(refreshStart.duration(to: .now))
         logger.notice(
-            "Surface offscreen refresh ended role=\(role, privacy: .public) requestedPage=\(pageIndex) generation=\(generation) ms=\(elapsed, format: .fixed(precision: 2)) previous=\(self.surfaceState(self.previousSurface), privacy: .public) current=\(self.surfaceState(self.currentSurface), privacy: .public) next=\(self.surfaceState(self.nextSurface), privacy: .public)"
+            "Surface offscreen refresh ended token=\(token) role=\(role, privacy: .public) requestedPage=\(pageIndex) generation=\(generation) ms=\(elapsed, format: .fixed(precision: 2)) previous=\(self.surfaceState(self.previousSurface), privacy: .public) current=\(self.surfaceState(self.currentSurface), privacy: .public) next=\(self.surfaceState(self.nextSurface), privacy: .public)"
+        )
+    }
+
+    private func scheduleOffscreenRefresh(_ request: OffscreenRefreshRequest) {
+        if scheduledOffscreenRefresh != nil {
+            scheduledOffscreenRefresh?.cancel()
+            logger.notice(
+                "Surface offscreen refresh coalesced previousToken=\(self.offscreenRefreshToken) newDirection=\(request.direction.rawValue, privacy: .public) newPage=\(request.requestedPage)"
+            )
+        }
+
+        offscreenRefreshToken += 1
+        var request = request
+        request.token = offscreenRefreshToken
+        let token = request.token
+        let workItem = DispatchWorkItem { [weak self] in
+            Task { @MainActor [weak self] in
+                self?.performScheduledOffscreenRefresh(request)
+            }
+        }
+        scheduledOffscreenRefresh = workItem
+        logger.notice(
+            "Surface offscreen refresh scheduled token=\(token) role=\(request.expectedRole, privacy: .public) requestedPage=\(request.requestedPage) targetPage=\(request.targetPage) delay=\(self.offscreenRefreshDelay)"
+        )
+        DispatchQueue.main.asyncAfter(deadline: .now() + offscreenRefreshDelay, execute: workItem)
+    }
+
+    private func cancelScheduledOffscreenRefresh(reason: String) {
+        guard scheduledOffscreenRefresh != nil else {
+            return
+        }
+
+        scheduledOffscreenRefresh?.cancel()
+        scheduledOffscreenRefresh = nil
+        offscreenRefreshToken += 1
+        logger.notice(
+            "Surface offscreen refresh canceled reason=\(reason, privacy: .public) token=\(self.offscreenRefreshToken)"
+        )
+    }
+
+    private func performScheduledOffscreenRefresh(_ request: OffscreenRefreshRequest) {
+        guard request.token == offscreenRefreshToken else {
+            logger.notice(
+                "Surface offscreen refresh ignored stale token=\(request.token) latest=\(self.offscreenRefreshToken)"
+            )
+            return
+        }
+
+        scheduledOffscreenRefresh = nil
+        guard activeTransition == nil, !isSettling else {
+            logger.notice(
+                "Surface offscreen refresh canceled busy token=\(request.token) settling=\(self.isSettling) transition=\(self.activeTransitionDescription, privacy: .public)"
+            )
+            return
+        }
+
+        guard currentPage == request.targetPage else {
+            logger.notice(
+                "Surface offscreen refresh canceled page-changed token=\(request.token) expectedCurrent=\(request.targetPage) actualCurrent=\(self.currentPage)"
+            )
+            return
+        }
+
+        let surface = surface(forRole: request.expectedRole)
+        guard canRefreshOffscreen(surface: surface, expectedRole: request.expectedRole) else {
+            logger.notice(
+                "Surface offscreen refresh canceled not-offscreen token=\(request.token) role=\(request.expectedRole, privacy: .public) requestedPage=\(request.requestedPage) state=\(self.surfaceState(surface), privacy: .public)"
+            )
+            return
+        }
+
+        logger.notice(
+            "Surface offscreen refresh executing token=\(request.token) role=\(request.expectedRole, privacy: .public) requestedPage=\(request.requestedPage) settling=\(self.isSettling) transition=\(self.activeTransitionDescription, privacy: .public)"
+        )
+        refreshOffscreenSurface(
+            after: request.direction,
+            targetPage: request.targetPage,
+            layout: request.layout,
+            iconCache: request.iconCache,
+            onLaunch: request.onLaunch,
+            token: request.token
         )
     }
 
@@ -567,6 +669,7 @@ final class PagingSurfaceController {
         settleGeneration += 1
         let settleID = settleGeneration
         isSettling = true
+        activeSettleCompletion = completion
         startSettleDebugSampling(target: targetTranslation)
         logger.notice("Surface settle began target=\(targetTranslation) from=\(fromValue)")
 
@@ -594,7 +697,13 @@ final class PagingSurfaceController {
 
         CATransaction.begin()
         CATransaction.setCompletionBlock { [weak self] in
-            guard let self, self.settleGeneration == settleID else {
+            guard let self else {
+                return
+            }
+            guard self.settleGeneration == settleID else {
+                self.logger.notice(
+                    "Surface stale settle completion ignored settleID=\(settleID) currentGeneration=\(self.settleGeneration)"
+                )
                 return
             }
 
@@ -611,8 +720,9 @@ final class PagingSurfaceController {
 
     private func completeSettle(completion: SettleCompletion) {
         stopSettleDebugSampling()
-        logger.notice("Surface settle ended page=\(self.currentPage)")
-        var offscreenRefresh: (() -> Void)?
+        activeSettleCompletion = nil
+        logger.notice("Surface settle ended page=\(self.currentPage) generation=\(self.settleGeneration)")
+        var offscreenRefresh: OffscreenRefreshRequest?
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         switch completion {
@@ -620,42 +730,79 @@ final class PagingSurfaceController {
             setTranslation(0, alignToPixel: true)
             clearActiveTransition()
         case let .commit(direction, targetPage, layout, iconCache, onLaunch, commitPage):
-            let rotationStart = ContinuousClock.now
-            let centerBefore = centeredSurfaceFrameBeforeRotation(direction: direction)
-            let expectedCenterSurface = destinationSurface(for: direction)
-            logger.notice(
-                "Surface slot rotation began direction=\(direction.rawValue, privacy: .public) targetPage=\(targetPage) previous=\(self.surfaceState(self.previousSurface), privacy: .public) current=\(self.surfaceState(self.currentSurface), privacy: .public) next=\(self.surfaceState(self.nextSurface), privacy: .public)"
+            offscreenRefresh = commitActiveTransition(
+                direction: direction,
+                targetPage: targetPage,
+                layout: layout,
+                iconCache: iconCache,
+                onLaunch: onLaunch,
+                reason: "settle-completion",
+                commitPage: commitPage
             )
-            rotateSlots(direction: direction)
-            setTranslation(0, alignToPixel: true)
-            currentPage = targetPage
-            commitPage()
-            clearActiveTransition()
-            let centerAfter = visibleFrame(surface: currentSurface, translation: 0)
-            let continuityError = frameDistance(centerBefore, centerAfter)
-            let sameSurface = currentSurface === expectedCenterSurface
-            let elapsed = milliseconds(rotationStart.duration(to: .now))
-            logger.notice(
-                "Surface slots atomically rotated direction=\(direction.rawValue, privacy: .public) currentPage=\(targetPage) sameSurface=\(sameSurface) slotError=\(continuityError, format: .fixed(precision: 3)) ms=\(elapsed, format: .fixed(precision: 2)) surfaceCount=\(self.transitionView.subviews.count)"
-            )
-            offscreenRefresh = { [weak self] in
-                self?.refreshOffscreenSurface(
-                    after: direction,
-                    targetPage: targetPage,
-                    layout: layout,
-                    iconCache: iconCache,
-                    onLaunch: onLaunch
-                )
-            }
         }
         CATransaction.commit()
-        offscreenRefresh?()
         gestureStartTranslation = 0
         isSettling = false
         driver.reset(to: 0)
         driver.start()
+        if let offscreenRefresh {
+            scheduleOffscreenRefresh(offscreenRefresh)
+        }
         exportMotionCSVIfNeeded()
         logger.notice("Surface settle complete page=\(self.currentPage) surfaceCount=\(self.transitionView.subviews.count)")
+    }
+
+    private func commitActiveTransition(
+        direction: PagingDirection,
+        targetPage: Int,
+        layout: LaunchpadLayout,
+        iconCache: IconCache,
+        onLaunch: @escaping (AppItem) -> Void,
+        reason: String,
+        commitPage: () -> Void
+    ) -> OffscreenRefreshRequest {
+        let rotationStart = ContinuousClock.now
+        let transition = activeTransition
+        let centerBefore = centeredSurfaceFrameBeforeRotation(direction: direction)
+        let expectedCenterSurface = destinationSurface(for: direction)
+        logger.notice(
+            "Surface transition commit began reason=\(reason, privacy: .public) session=\(transition?.sessionID ?? 0) generation=\(self.settleGeneration) direction=\(direction.rawValue, privacy: .public) pageBefore=\(self.currentPage) targetPage=\(targetPage) previous=\(self.surfaceState(self.previousSurface), privacy: .public) current=\(self.surfaceState(self.currentSurface), privacy: .public) next=\(self.surfaceState(self.nextSurface), privacy: .public)"
+        )
+
+        rotateSlots(direction: direction)
+        setTranslation(0, alignToPixel: true)
+        currentPage = targetPage
+        commitPage()
+        clearActiveTransition()
+
+        let centerAfter = visibleFrame(surface: currentSurface, translation: 0)
+        let continuityError = frameDistance(centerBefore, centerAfter)
+        let sameSurface = currentSurface === expectedCenterSurface
+        let elapsed = milliseconds(rotationStart.duration(to: .now))
+        let requestedPage: Int
+        let expectedRole: String
+        switch direction {
+        case .next:
+            requestedPage = targetPage + 1
+            expectedRole = "next"
+        case .previous:
+            requestedPage = targetPage - 1
+            expectedRole = "previous"
+        }
+        logger.notice(
+            "Surface transition commit ended reason=\(reason, privacy: .public) session=\(transition?.sessionID ?? 0) pageAfter=\(self.currentPage) sameSurface=\(sameSurface) slotError=\(continuityError, format: .fixed(precision: 3)) ms=\(elapsed, format: .fixed(precision: 2)) refreshRole=\(expectedRole, privacy: .public) refreshPage=\(requestedPage) previous=\(self.surfaceState(self.previousSurface), privacy: .public) current=\(self.surfaceState(self.currentSurface), privacy: .public) next=\(self.surfaceState(self.nextSurface), privacy: .public)"
+        )
+
+        return OffscreenRefreshRequest(
+            token: 0,
+            direction: direction,
+            targetPage: targetPage,
+            requestedPage: requestedPage,
+            expectedRole: expectedRole,
+            layout: layout,
+            iconCache: iconCache,
+            onLaunch: onLaunch
+        )
     }
 
     private func settleDuration(
@@ -705,6 +852,52 @@ final class PagingSurfaceController {
         let visibleTranslation = presentationTranslation() ?? currentTranslation
         settleGeneration += 1
         stopSettleDebugSampling()
+        let interruptedGeneration = settleGeneration
+
+        if let transition = activeTransition,
+           let completion = activeSettleCompletion,
+           shouldCommitInterruptedTransition(visibleTranslation: visibleTranslation, transition: transition) {
+            activeSettleCompletion = nil
+            logger.notice(
+                "Surface settle interrupted near full page reason=\(reason, privacy: .public) session=\(transition.sessionID) generation=\(interruptedGeneration) visibleTranslation=\(visibleTranslation) pageWidth=\(self.pageWidth) pageBefore=\(self.currentPage) direction=\(transition.direction.rawValue, privacy: .public)"
+            )
+
+            let targetTranslation = targetTranslation(for: transition.direction)
+            var offscreenRefresh: OffscreenRefreshRequest?
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            transitionView.layer?.removeAnimation(forKey: "surface-settle")
+            transitionView.layer?.transform = CATransform3DMakeTranslation(targetTranslation, 0, 0)
+            switch completion {
+            case .cancel:
+                setTranslation(0, alignToPixel: true)
+                clearActiveTransition()
+            case let .commit(direction, targetPage, layout, iconCache, onLaunch, commitPage):
+                offscreenRefresh = commitActiveTransition(
+                    direction: direction,
+                    targetPage: targetPage,
+                    layout: layout,
+                    iconCache: iconCache,
+                    onLaunch: onLaunch,
+                    reason: "near-full-interrupt",
+                    commitPage: commitPage
+                )
+            }
+            CATransaction.commit()
+
+            gestureStartTranslation = 0
+            isSettling = false
+            driver.reset(to: 0)
+            driver.start()
+            if let offscreenRefresh {
+                scheduleOffscreenRefresh(offscreenRefresh)
+            }
+            exportMotionCSVIfNeeded()
+            logger.notice(
+                "Surface settle interrupt committed session=\(transition.sessionID) pageAfter=\(self.currentPage) generation=\(self.settleGeneration)"
+            )
+            return
+        }
 
         CATransaction.begin()
         CATransaction.setDisableActions(true)
@@ -712,14 +905,37 @@ final class PagingSurfaceController {
         transitionView.layer?.transform = CATransform3DMakeTranslation(visibleTranslation, 0, 0)
         CATransaction.commit()
 
+        activeSettleCompletion = nil
         currentTranslation = visibleTranslation
         gestureStartTranslation = visibleTranslation
         driver.reset(to: visibleTranslation)
         isSettling = false
         updateDebugSurfaceVisuals()
         logger.notice(
-            "Surface settle interrupted reason=\(reason, privacy: .public) visibleTranslation=\(visibleTranslation) page=\(self.currentPage)"
+            "Surface settle interrupted reason=\(reason, privacy: .public) generation=\(interruptedGeneration) visibleTranslation=\(visibleTranslation) page=\(self.currentPage)"
         )
+    }
+
+    private func shouldCommitInterruptedTransition(
+        visibleTranslation: CGFloat,
+        transition: ActivePagingTransition
+    ) -> Bool {
+        guard pageWidth > 0 else {
+            return false
+        }
+
+        let target = targetTranslation(for: transition.direction)
+        return abs(visibleTranslation) >= pageWidth * 0.95
+            && visibleTranslation * target > 0
+    }
+
+    private func targetTranslation(for direction: PagingDirection) -> CGFloat {
+        switch direction {
+        case .next:
+            -pageWidth
+        case .previous:
+            pageWidth
+        }
     }
 
     private func applyTranslation(_ translation: CGFloat, alignToPixel: Bool = false) {
@@ -953,6 +1169,19 @@ final class PagingSurfaceController {
             return "next"
         }
         return "unknown"
+    }
+
+    private func surface(forRole role: String) -> PageSurfaceView {
+        switch role {
+        case "previous":
+            previousSurface
+        case "current":
+            currentSurface
+        case "next":
+            nextSurface
+        default:
+            currentSurface
+        }
     }
 
     private func centeredSurfaceFrameBeforeRotation(direction: PagingDirection) -> CGRect {
