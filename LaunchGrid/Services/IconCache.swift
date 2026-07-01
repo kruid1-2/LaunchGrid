@@ -7,6 +7,9 @@ final class IconCache {
     private let iconQueue = DispatchQueue(label: "com.launchgrid.icon-cache", qos: .utility)
     private let pendingLock = NSLock()
     private var pendingCompletions: [NSString: [(NSImage) -> Void]] = [:]
+    private let generationLock = NSLock()
+    private var nextGenerationValue = 0
+    private var pathGenerations: [String: Int] = [:]
     private let fallbackImage: NSImage
 
     init(workspace: NSWorkspace = .shared) {
@@ -23,6 +26,15 @@ final class IconCache {
 
     func cachedIcon(forPath path: String) -> NSImage? {
         cache.object(forKey: path as NSString)
+    }
+
+    func snapshotGeneration(forPath path: String) -> Int {
+        generationLock.lock()
+        defer {
+            generationLock.unlock()
+        }
+
+        return pathGenerations[path] ?? 0
     }
 
     func loadIcon(for app: AppItem, completion: @escaping (NSImage) -> Void) {
@@ -76,6 +88,7 @@ final class IconCache {
             let finalImage = image.isValid ? image : self.fallbackImage.copy() as? NSImage ?? self.fallbackImage
             finalImage.size = NSSize(width: 128, height: 128)
             self.cache.setObject(finalImage, forKey: key)
+            self.recordSnapshotGeneration(forPath: path)
 
             self.pendingLock.lock()
             let completions = self.pendingCompletions.removeValue(forKey: key) ?? []
@@ -87,5 +100,12 @@ final class IconCache {
                 }
             }
         }
+    }
+
+    private func recordSnapshotGeneration(forPath path: String) {
+        generationLock.lock()
+        nextGenerationValue += 1
+        pathGenerations[path] = nextGenerationValue
+        generationLock.unlock()
     }
 }

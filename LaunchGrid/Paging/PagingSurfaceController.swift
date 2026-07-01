@@ -27,6 +27,7 @@ final class PagingSurfaceController {
     private let logger = Logger(subsystem: "com.launchgrid.app", category: "paging-surface")
     private let signposter = OSSignposter(subsystem: "com.launchgrid.app", category: "paging-surface")
     private let cache = PageSurfaceCache()
+    private let snapshotCache = PageSnapshotCache()
     private let containerView = SurfaceContainerView()
     private let transitionView = NSView()
     private let motionDebugLabel = NSTextField(labelWithString: "")
@@ -59,6 +60,9 @@ final class PagingSurfaceController {
     private var transitionSessionID: UInt64 = 0
     private var offscreenRefreshToken: UInt64 = 0
     private var scheduledOffscreenRefresh: DispatchWorkItem?
+    private var snapshotPrewarmToken: UInt64 = 0
+    private var scheduledSnapshotPrewarm: DispatchWorkItem?
+    private var snapshotPrewarmRetryCount = 0
     private var activeDestination: PagingDirection?
     private var activeTransition: ActivePagingTransition?
     private let motionResponseTime: TimeInterval = 0.008
@@ -68,6 +72,8 @@ final class PagingSurfaceController {
     private let minSettleDuration: TimeInterval = 0.12
     private let maxSettleDuration: TimeInterval = 0.24
     private let offscreenRefreshDelay: TimeInterval = 0.05
+    private let snapshotPrewarmDelay: TimeInterval = 0.25
+    private let maxSnapshotPrewarmRetries = 3
     private let debugMotionEnabled = ProcessInfo.processInfo.environment["LAUNCHGRID_DEBUG_MOTION"] == "1"
     private let debugSurfaceBordersEnabled = ProcessInfo.processInfo.environment["LAUNCHGRID_DEBUG_SURFACES"] == "1"
     private let debugSurfaceProbeEnabled = ProcessInfo.processInfo.environment["LAUNCHGRID_DEBUG_SURFACE_PROBE"] == "1"
@@ -138,6 +144,13 @@ final class PagingSurfaceController {
         for surface in [previousSurface, currentSurface, nextSurface] {
             surface.wantsLayer = true
             surface.layer?.actions = disabledLayerActions
+            surface.onCacheableSnapshotRendered = { [weak self] surface, snapshot in
+                self?.insertRenderedSnapshot(
+                    surface: surface,
+                    snapshot: snapshot,
+                    reason: "surface-render-callback"
+                )
+            }
             transitionView.addSubview(surface)
         }
 
@@ -197,8 +210,14 @@ final class PagingSurfaceController {
         }
 
         currentPage = contextCurrentPage
+        if signature != nil {
+            snapshotCache.removeAll()
+            snapshotPrewarmRetryCount = 0
+            logger.notice("Snapshot cache invalidated reason=surface-signature-changed")
+        }
         signature = nextSignature
         configureAllSurfaces(context: context)
+        scheduleSnapshotPrewarm(layout: context.layout, iconCache: context.iconCache, onLaunch: context.onLaunch, reason: "install")
         runDebugContinuityProbeIfNeeded()
         logger.notice(
             "Surface installed page=\(self.currentPage) pageCount=\(context.pages.count) pageWidth=\(self.pageWidth) surfaceCount=\(self.transitionView.subviews.count)"
@@ -327,6 +346,7 @@ final class PagingSurfaceController {
         settleGeneration += 1
         activeSettleCompletion = nil
         cancelScheduledOffscreenRefresh(reason: "invalidate")
+        cancelScheduledSnapshotPrewarm(reason: "invalidate")
         clearActiveTransition()
         stopSettleDebugSampling()
         transitionView.layer?.removeAllAnimations()
@@ -339,6 +359,7 @@ final class PagingSurfaceController {
         settleGeneration += 1
         activeSettleCompletion = nil
         cancelScheduledOffscreenRefresh(reason: "stop")
+        cancelScheduledSnapshotPrewarm(reason: "stop")
         stopSettleDebugSampling()
         transitionView.layer?.removeAllAnimations()
         applyTranslation(0, alignToPixel: true)
@@ -387,7 +408,8 @@ final class PagingSurfaceController {
             layout: context.layout,
             iconCache: context.iconCache,
             generation: generation,
-            onLaunch: context.onLaunch
+            onLaunch: context.onLaunch,
+            reason: "configure-all-previous"
         )
         configure(
             surface: currentSurface,
@@ -395,7 +417,8 @@ final class PagingSurfaceController {
             layout: context.layout,
             iconCache: context.iconCache,
             generation: generation,
-            onLaunch: context.onLaunch
+            onLaunch: context.onLaunch,
+            reason: "configure-all-current"
         )
         configure(
             surface: nextSurface,
@@ -403,7 +426,8 @@ final class PagingSurfaceController {
             layout: context.layout,
             iconCache: context.iconCache,
             generation: generation,
-            onLaunch: context.onLaunch
+            onLaunch: context.onLaunch,
+            reason: "configure-all-next"
         )
         preloadFarNeighbors(iconCache: context.iconCache)
         applyTranslation(0, alignToPixel: true)
@@ -414,6 +438,7 @@ final class PagingSurfaceController {
     private func beginActiveTransition(direction: PagingDirection) {
         clearActiveTransition()
         cancelScheduledOffscreenRefresh(reason: "begin-transition")
+        cancelScheduledSnapshotPrewarm(reason: "begin-transition")
         transitionSessionID += 1
 
         let source = currentSurface
@@ -503,7 +528,8 @@ final class PagingSurfaceController {
             layout: layout,
             iconCache: iconCache,
             generation: generation,
-            onLaunch: onLaunch
+            onLaunch: onLaunch,
+            reason: "offscreen-refresh"
         )
         let elapsed = milliseconds(refreshStart.duration(to: .now))
         logger.notice(
@@ -546,6 +572,161 @@ final class PagingSurfaceController {
         logger.notice(
             "Surface offscreen refresh canceled reason=\(reason, privacy: .public) token=\(self.offscreenRefreshToken)"
         )
+    }
+
+    private func scheduleSnapshotPrewarm(
+        layout: LaunchpadLayout,
+        iconCache: IconCache,
+        onLaunch: @escaping (AppItem) -> Void,
+        reason: String
+    ) {
+        guard !debugSurfaceBordersEnabled else {
+            logger.notice("Snapshot prewarm skipped reason=debug-surfaces-enabled")
+            return
+        }
+
+        scheduledSnapshotPrewarm?.cancel()
+        snapshotPrewarmToken += 1
+        let token = snapshotPrewarmToken
+        let workItem = DispatchWorkItem { [weak self] in
+            Task { @MainActor [weak self] in
+                self?.performSnapshotPrewarm(
+                    token: token,
+                    layout: layout,
+                    iconCache: iconCache,
+                    onLaunch: onLaunch,
+                    reason: reason
+                )
+            }
+        }
+        scheduledSnapshotPrewarm = workItem
+        logger.notice("Snapshot prewarm scheduled token=\(token) reason=\(reason, privacy: .public) delay=\(self.snapshotPrewarmDelay)")
+        DispatchQueue.main.asyncAfter(deadline: .now() + snapshotPrewarmDelay, execute: workItem)
+    }
+
+    private func cancelScheduledSnapshotPrewarm(reason: String) {
+        guard scheduledSnapshotPrewarm != nil else {
+            return
+        }
+
+        scheduledSnapshotPrewarm?.cancel()
+        scheduledSnapshotPrewarm = nil
+        snapshotPrewarmToken += 1
+        logger.notice("Snapshot prewarm canceled reason=\(reason, privacy: .public) token=\(self.snapshotPrewarmToken)")
+    }
+
+    private func performSnapshotPrewarm(
+        token: UInt64,
+        layout: LaunchpadLayout,
+        iconCache: IconCache,
+        onLaunch: @escaping (AppItem) -> Void,
+        reason: String
+    ) {
+        guard token == snapshotPrewarmToken else {
+            logger.notice("Snapshot prewarm ignored stale token=\(token) latest=\(self.snapshotPrewarmToken)")
+            return
+        }
+
+        scheduledSnapshotPrewarm = nil
+        guard activeTransition == nil, !isSettling else {
+            logger.notice("Snapshot prewarm canceled busy token=\(token) settling=\(self.isSettling) transition=\(self.activeTransitionDescription, privacy: .public)")
+            return
+        }
+
+        logger.notice("Snapshot prewarm began token=\(token) reason=\(reason, privacy: .public) page=\(self.currentPage)")
+        insertRenderedSnapshotIfPossible(surface: previousSurface, layout: layout, iconCache: iconCache, reason: "prewarm-existing-previous")
+        insertRenderedSnapshotIfPossible(surface: currentSurface, layout: layout, iconCache: iconCache, reason: "prewarm-existing-current")
+        insertRenderedSnapshotIfPossible(surface: nextSurface, layout: layout, iconCache: iconCache, reason: "prewarm-existing-next")
+
+        var needsRetry = false
+        if currentPage == 0, pages.indices.contains(2) {
+            let finalPageIndex = 2
+            let pageIndexes = [2, 3].filter { pages.indices.contains($0) }
+            needsRetry = !prewarmSpareSurface(
+                previousSurface,
+                pageIndexes: pageIndexes,
+                finalPageIndex: finalPageIndex,
+                layout: layout,
+                iconCache: iconCache,
+                onLaunch: onLaunch,
+                reason: "idle-prewarm-forward-spare"
+            )
+        } else if currentPage == pages.count - 1, pages.indices.contains(currentPage - 2) {
+            let finalPageIndex = currentPage - 2
+            let pageIndexes = [currentPage - 2, currentPage - 3].filter { pages.indices.contains($0) }
+            needsRetry = !prewarmSpareSurface(
+                nextSurface,
+                pageIndexes: pageIndexes,
+                finalPageIndex: finalPageIndex,
+                layout: layout,
+                iconCache: iconCache,
+                onLaunch: onLaunch,
+                reason: "idle-prewarm-backward-spare"
+            )
+        }
+        let summary = snapshotCache.summary
+        logger.notice("Snapshot prewarm ended token=\(token) count=\(summary.count) bytes=\(summary.estimatedBytes)")
+        if needsRetry, snapshotPrewarmRetryCount < maxSnapshotPrewarmRetries {
+            snapshotPrewarmRetryCount += 1
+            scheduleSnapshotPrewarm(
+                layout: layout,
+                iconCache: iconCache,
+                onLaunch: onLaunch,
+                reason: "retry-\(snapshotPrewarmRetryCount)"
+            )
+        } else if !needsRetry {
+            snapshotPrewarmRetryCount = 0
+        }
+    }
+
+    @discardableResult
+    private func prewarmSpareSurface(
+        _ surface: PageSurfaceView,
+        pageIndexes: [Int],
+        finalPageIndex: Int,
+        layout: LaunchpadLayout,
+        iconCache: IconCache,
+        onLaunch: @escaping (AppItem) -> Void,
+        reason: String
+    ) -> Bool {
+        var allPagesCached = true
+        for pageIndex in pageIndexes {
+            configure(
+                surface: surface,
+                pageIndex: pageIndex,
+                layout: layout,
+                iconCache: iconCache,
+                generation: cache.nextGeneration(),
+                onLaunch: onLaunch,
+                reason: "\(reason)-page-\(pageIndex)"
+            )
+            allPagesCached = isSnapshotCached(
+                pageIndex: pageIndex,
+                surface: surface,
+                layout: layout,
+                iconCache: iconCache
+            ) && allPagesCached
+        }
+
+        guard surface.pageIndex != finalPageIndex else {
+            return allPagesCached
+        }
+
+        configure(
+            surface: surface,
+            pageIndex: finalPageIndex,
+            layout: layout,
+            iconCache: iconCache,
+            generation: cache.nextGeneration(),
+            onLaunch: onLaunch,
+            reason: "\(reason)-restore-\(finalPageIndex)"
+        )
+        return isSnapshotCached(
+            pageIndex: finalPageIndex,
+            surface: surface,
+            layout: layout,
+            iconCache: iconCache
+        ) && allPagesCached
     }
 
     private func performScheduledOffscreenRefresh(_ request: OffscreenRefreshRequest) {
@@ -606,7 +787,8 @@ final class PagingSurfaceController {
         layout: LaunchpadLayout,
         iconCache: IconCache,
         generation: Int,
-        onLaunch: @escaping (AppItem) -> Void
+        onLaunch: @escaping (AppItem) -> Void,
+        reason: String
     ) {
         if surface.isPagingLocked || activeTransition?.contains(surface) == true {
             logger.fault(
@@ -622,16 +804,266 @@ final class PagingSurfaceController {
             return
         }
 
-        let pageApps = pages.indices.contains(pageIndex) ? pages[pageIndex] : []
+        let pageApps = pageApps(for: pageIndex)
+        let snapshotKey = makeSnapshotKey(
+            pageIndex: pageIndex,
+            apps: pageApps,
+            layout: layout,
+            surface: surface,
+            iconCache: iconCache
+        )
+
+        if let snapshotKey,
+           let entry = snapshotCache.entry(for: snapshotKey) {
+            let bindStart = ContinuousClock.now
+            surface.configure(
+                pageIndex: pageIndex,
+                apps: pageApps,
+                layout: layout,
+                iconCache: iconCache,
+                generation: generation,
+                onLaunch: onLaunch,
+                cachedSnapshot: entry.snapshot
+            )
+            let elapsed = milliseconds(bindStart.duration(to: .now))
+            let summary = snapshotCache.summary
+            logger.notice(
+                "Snapshot cache hit reason=\(reason, privacy: .public) key=\(snapshotKey.description, privacy: .public) bindMs=\(elapsed, format: .fixed(precision: 2)) count=\(summary.count) bytes=\(summary.estimatedBytes)"
+            )
+            return
+        }
+
+        if let snapshotKey {
+            logger.notice("Snapshot cache miss reason=\(reason, privacy: .public) key=\(snapshotKey.description, privacy: .public)")
+        } else {
+            logger.notice("Snapshot cache skipped reason=\(reason, privacy: .public) page=\(pageIndex)")
+        }
+
         surface.configure(
             pageIndex: pageIndex,
             apps: pageApps,
             layout: layout,
             iconCache: iconCache,
             generation: generation,
-            onLaunch: onLaunch
+            onLaunch: onLaunch,
+            deferRender: true
         )
-        surface.forceRenderIfNeeded()
+        let renderStart = ContinuousClock.now
+        let snapshot = surface.forceRenderIfNeeded()
+        let elapsed = milliseconds(renderStart.duration(to: .now))
+        logger.notice(
+            "Snapshot cache miss render reason=\(reason, privacy: .public) page=\(pageIndex) renderMs=\(elapsed, format: .fixed(precision: 2)) cacheable=\(snapshot != nil)"
+        )
+        if let snapshot {
+            let renderedKey = makeSnapshotKey(
+                pageIndex: pageIndex,
+                apps: pageApps,
+                layout: layout,
+                surface: surface,
+                iconCache: iconCache
+            )
+            if let snapshotKey, let renderedKey, snapshotKey != renderedKey {
+                logger.notice(
+                    "Snapshot cache key changed during render reason=\(reason, privacy: .public) before=\(snapshotKey.description, privacy: .public) after=\(renderedKey.description, privacy: .public)"
+                )
+            }
+            if let renderedKey {
+                insert(snapshot: snapshot, for: renderedKey, reason: reason)
+            }
+        } else if let snapshotKey {
+            logger.notice("Snapshot cache insert skipped key=\(snapshotKey.description, privacy: .public) reason=not-cacheable")
+        }
+    }
+
+    private func insertRenderedSnapshotIfPossible(
+        surface: PageSurfaceView,
+        layout: LaunchpadLayout,
+        iconCache: IconCache,
+        reason: String
+    ) {
+        let apps = pageApps(for: surface.pageIndex)
+        guard let key = makeSnapshotKey(
+            pageIndex: surface.pageIndex,
+            apps: apps,
+            layout: layout,
+            surface: surface,
+            iconCache: iconCache
+        ) else {
+            logger.notice("Snapshot cache prewarm skipped reason=\(reason, privacy: .public) page=\(surface.pageIndex)")
+            return
+        }
+
+        if snapshotCache.entry(for: key) != nil {
+            logger.notice("Snapshot cache prewarm already cached reason=\(reason, privacy: .public) key=\(key.description, privacy: .public)")
+            return
+        }
+
+        guard let snapshot = surface.renderedSnapshotIfCacheable() else {
+            logger.notice("Snapshot cache prewarm skipped reason=\(reason, privacy: .public) key=\(key.description, privacy: .public) cause=not-cacheable")
+            return
+        }
+
+        insert(snapshot: snapshot, for: key, reason: reason)
+    }
+
+    private func insertRenderedSnapshot(
+        surface: PageSurfaceView,
+        snapshot: PageSurfaceSnapshot,
+        reason: String
+    ) {
+        guard let layout, let iconCache else {
+            return
+        }
+
+        let apps = pageApps(for: surface.pageIndex)
+        guard let key = makeSnapshotKey(
+            pageIndex: surface.pageIndex,
+            apps: apps,
+            layout: layout,
+            surface: surface,
+            iconCache: iconCache
+        ) else {
+            return
+        }
+
+        insert(snapshot: snapshot, for: key, reason: reason)
+    }
+
+    private func isSnapshotCached(
+        pageIndex: Int,
+        surface: PageSurfaceView,
+        layout: LaunchpadLayout,
+        iconCache: IconCache
+    ) -> Bool {
+        guard let key = makeSnapshotKey(
+            pageIndex: pageIndex,
+            apps: pageApps(for: pageIndex),
+            layout: layout,
+            surface: surface,
+            iconCache: iconCache
+        ) else {
+            return false
+        }
+
+        return snapshotCache.entry(for: key) != nil
+    }
+
+    private func insert(
+        snapshot: PageSurfaceSnapshot,
+        for key: PageSnapshotCache.Key,
+        reason: String
+    ) {
+        if snapshotCache.entry(for: key) != nil {
+            logger.notice("Snapshot cache insert skipped existing reason=\(reason, privacy: .public) key=\(key.description, privacy: .public)")
+            return
+        }
+
+        let evicted = snapshotCache.insert(
+            snapshot: snapshot,
+            for: key,
+            protectedKeys: protectedSnapshotKeys()
+        )
+        let summary = snapshotCache.summary
+        logger.notice(
+            "Snapshot cache insert reason=\(reason, privacy: .public) key=\(key.description, privacy: .public) point=\(Int(snapshot.pointSize.width))x\(Int(snapshot.pointSize.height)) pixel=\(Int(snapshot.pixelSize.width))x\(Int(snapshot.pixelSize.height)) scale=\(snapshot.scale, format: .fixed(precision: 2)) bytes=\(snapshot.byteCost) count=\(summary.count) totalBytes=\(summary.estimatedBytes)"
+        )
+        for entry in evicted {
+            logger.notice(
+                "Snapshot cache evict key=\(entry.key.description, privacy: .public) bytes=\(entry.snapshot.byteCost) count=\(summary.count) totalBytes=\(summary.estimatedBytes)"
+            )
+        }
+    }
+
+    private func protectedSnapshotKeys() -> Set<PageSnapshotCache.Key> {
+        guard let layout, let iconCache else {
+            return []
+        }
+
+        return Set([previousSurface, currentSurface, nextSurface].compactMap { surface in
+            makeSnapshotKey(
+                pageIndex: surface.pageIndex,
+                apps: pageApps(for: surface.pageIndex),
+                layout: layout,
+                surface: surface,
+                iconCache: iconCache
+            )
+        })
+    }
+
+    private func makeSnapshotKey(
+        pageIndex: Int,
+        apps: [AppItem],
+        layout: LaunchpadLayout,
+        surface: PageSurfaceView,
+        iconCache: IconCache
+    ) -> PageSnapshotCache.Key? {
+        guard pages.indices.contains(pageIndex),
+              !debugSurfaceBordersEnabled,
+              surface.bounds.width > 1,
+              surface.bounds.height > 1 else {
+            return nil
+        }
+
+        let scale = surface.window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
+        let appearance = surface.effectiveAppearance.bestMatch(from: [
+            .aqua,
+            .darkAqua,
+            .accessibilityHighContrastAqua,
+            .accessibilityHighContrastDarkAqua
+        ])?.rawValue ?? "unknown"
+        let contentSignature = apps.map { app in
+            [
+                app.id,
+                app.name,
+                app.bundleIdentifier ?? "",
+                app.normalizedPath
+            ].joined(separator: "|")
+        }.joined(separator: "\u{1f}")
+        let iconSignature = apps.map { app in
+            "\(app.normalizedPath)=\(iconCache.snapshotGeneration(forPath: app.normalizedPath))"
+        }.joined(separator: "\u{1f}")
+
+        return PageSnapshotCache.Key(
+            pageIndex: pageIndex,
+            contentSignature: contentSignature,
+            layoutSignature: layoutSignature(layout),
+            pointWidth: quantized(surface.bounds.width),
+            pointHeight: quantized(surface.bounds.height),
+            scale: quantized(scale),
+            appearanceSignature: appearance,
+            iconSignature: iconSignature
+        )
+    }
+
+    private func pageApps(for pageIndex: Int) -> [AppItem] {
+        pages.indices.contains(pageIndex) ? pages[pageIndex] : []
+    }
+
+    private func layoutSignature(_ layout: LaunchpadLayout) -> String {
+        [
+            "columns=\(layout.columns)",
+            "rows=\(layout.rows)",
+            "capacity=\(layout.pageCapacity)",
+            "icon=\(quantized(layout.iconSize))",
+            "labelWidth=\(quantized(layout.labelWidth))",
+            "labelHeight=\(quantized(layout.labelHeight))",
+            "labelFont=\(quantized(layout.labelFontSize))",
+            "cellWidth=\(quantized(layout.cellWidth))",
+            "cellHeight=\(quantized(layout.cellHeight))",
+            "columnSpacing=\(quantized(layout.columnSpacing))",
+            "rowSpacing=\(quantized(layout.rowSpacing))",
+            "gridWidth=\(quantized(layout.gridWidth))",
+            "gridHeight=\(quantized(layout.gridHeight))",
+            "pageWidth=\(quantized(layout.pageWidth))",
+            "contentX=\(quantized(layout.contentFrame.minX))",
+            "contentY=\(quantized(layout.contentFrame.minY))",
+            "contentW=\(quantized(layout.contentFrame.width))",
+            "contentH=\(quantized(layout.contentFrame.height))"
+        ].joined(separator: ";")
+    }
+
+    private func quantized(_ value: CGFloat) -> Int {
+        Int((value * 100).rounded())
     }
 
     private func layoutSurfaceFrames(pageHeight: CGFloat) {
