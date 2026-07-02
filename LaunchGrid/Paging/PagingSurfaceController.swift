@@ -62,7 +62,13 @@ final class PagingSurfaceController {
     private var scheduledOffscreenRefresh: DispatchWorkItem?
     private var snapshotPrewarmToken: UInt64 = 0
     private var scheduledSnapshotPrewarm: DispatchWorkItem?
-    private var snapshotPrewarmRetryCount = 0
+    private var queuedPrewarmKeys: Set<PageSnapshotCache.Key> = []
+    private var prewarmQueue: [SnapshotPrewarmTask] = []
+    private var isPrewarmRendering = false
+    private var lastUserInputTime: TimeInterval = 0
+    private var lastPrewarmEndTime: TimeInterval = 0
+    private var lastPrewarmDuration: TimeInterval = 0
+    private var controllerGeneration: UInt64 = 0
     private var activeDestination: PagingDirection?
     private var activeTransition: ActivePagingTransition?
     private let motionResponseTime: TimeInterval = 0.008
@@ -72,8 +78,9 @@ final class PagingSurfaceController {
     private let minSettleDuration: TimeInterval = 0.12
     private let maxSettleDuration: TimeInterval = 0.24
     private let offscreenRefreshDelay: TimeInterval = 0.05
-    private let snapshotPrewarmDelay: TimeInterval = 0.25
-    private let maxSnapshotPrewarmRetries = 3
+    private let prewarmIdleWindow: TimeInterval = 0.20
+    private let prewarmMinimumGap: TimeInterval = 0.16
+    private let prewarmLongRenderGap: TimeInterval = 0.35
     private let debugMotionEnabled = ProcessInfo.processInfo.environment["LAUNCHGRID_DEBUG_MOTION"] == "1"
     private let debugSurfaceBordersEnabled = ProcessInfo.processInfo.environment["LAUNCHGRID_DEBUG_SURFACES"] == "1"
     private let debugSurfaceProbeEnabled = ProcessInfo.processInfo.environment["LAUNCHGRID_DEBUG_SURFACE_PROBE"] == "1"
@@ -114,6 +121,45 @@ final class PagingSurfaceController {
         let layout: LaunchpadLayout
         let iconCache: IconCache
         let onLaunch: (AppItem) -> Void
+    }
+
+    private enum SnapshotPrewarmPriority: Int, Comparable, CustomStringConvertible {
+        case adjacentPrimary = 0
+        case adjacentSecondary = 1
+        case farDirection = 2
+        case longIdle = 3
+
+        static func < (lhs: SnapshotPrewarmPriority, rhs: SnapshotPrewarmPriority) -> Bool {
+            lhs.rawValue < rhs.rawValue
+        }
+
+        var description: String {
+            switch self {
+            case .adjacentPrimary:
+                "adjacent-primary"
+            case .adjacentSecondary:
+                "adjacent-secondary"
+            case .farDirection:
+                "far-direction"
+            case .longIdle:
+                "long-idle"
+            }
+        }
+    }
+
+    private struct SnapshotPrewarmTask {
+        let token: UInt64
+        let controllerGeneration: UInt64
+        let pageIndex: Int
+        let restorePageIndex: Int?
+        let role: String
+        let key: PageSnapshotCache.Key
+        let priority: SnapshotPrewarmPriority
+        let scheduledAt: TimeInterval
+        let layout: LaunchpadLayout
+        let iconCache: IconCache
+        let onLaunch: (AppItem) -> Void
+        let reason: String
     }
 
     private enum SettleCompletion {
@@ -212,12 +258,17 @@ final class PagingSurfaceController {
         currentPage = contextCurrentPage
         if signature != nil {
             snapshotCache.removeAll()
-            snapshotPrewarmRetryCount = 0
+            cancelSnapshotPrewarmQueue(reason: "surface-signature-changed")
             logger.notice("Snapshot cache invalidated reason=surface-signature-changed")
         }
+        controllerGeneration += 1
+        let installTime = ProcessInfo.processInfo.systemUptime
+        lastUserInputTime = installTime
+        lastPrewarmEndTime = installTime
+        lastPrewarmDuration = 0
         signature = nextSignature
         configureAllSurfaces(context: context)
-        scheduleSnapshotPrewarm(layout: context.layout, iconCache: context.iconCache, onLaunch: context.onLaunch, reason: "install")
+        enqueueStartupPrewarm(layout: context.layout, iconCache: context.iconCache, onLaunch: context.onLaunch, reason: "install")
         runDebugContinuityProbeIfNeeded()
         logger.notice(
             "Surface installed page=\(self.currentPage) pageCount=\(context.pages.count) pageWidth=\(self.pageWidth) surfaceCount=\(self.transitionView.subviews.count)"
@@ -225,6 +276,7 @@ final class PagingSurfaceController {
     }
 
     func beginGesture(context: Context, destination direction: PagingDirection) -> Bool {
+        markUserInteraction(reason: "begin-gesture")
         installOrUpdate(context: context)
         guard context.pages.count > 1 else {
             return false
@@ -261,6 +313,7 @@ final class PagingSurfaceController {
     }
 
     func track(offset: CGFloat) {
+        markUserInteraction(reason: "track")
         let target = min(pageWidth, max(-pageWidth, gestureStartTranslation + offset))
         driver.setTarget(target)
     }
@@ -271,6 +324,7 @@ final class PagingSurfaceController {
         releaseVelocity: CGFloat,
         commitPage: @escaping () -> Void
     ) {
+        markUserInteraction(reason: "finish")
         guard let layout, let iconCache, let onLaunch else {
             commitPage()
             return
@@ -306,6 +360,7 @@ final class PagingSurfaceController {
     }
 
     func cancel(duration: TimeInterval, releaseVelocity: CGFloat) {
+        markUserInteraction(reason: "cancel")
         animateToTarget(
             0,
             preferredDuration: duration,
@@ -346,7 +401,8 @@ final class PagingSurfaceController {
         settleGeneration += 1
         activeSettleCompletion = nil
         cancelScheduledOffscreenRefresh(reason: "invalidate")
-        cancelScheduledSnapshotPrewarm(reason: "invalidate")
+        cancelSnapshotPrewarmQueue(reason: "invalidate")
+        controllerGeneration += 1
         clearActiveTransition()
         stopSettleDebugSampling()
         transitionView.layer?.removeAllAnimations()
@@ -359,7 +415,8 @@ final class PagingSurfaceController {
         settleGeneration += 1
         activeSettleCompletion = nil
         cancelScheduledOffscreenRefresh(reason: "stop")
-        cancelScheduledSnapshotPrewarm(reason: "stop")
+        cancelSnapshotPrewarmQueue(reason: "stop")
+        controllerGeneration += 1
         stopSettleDebugSampling()
         transitionView.layer?.removeAllAnimations()
         applyTranslation(0, alignToPixel: true)
@@ -409,7 +466,8 @@ final class PagingSurfaceController {
             iconCache: context.iconCache,
             generation: generation,
             onLaunch: context.onLaunch,
-            reason: "configure-all-previous"
+            reason: "configure-all-previous",
+            renderImmediately: false
         )
         configure(
             surface: currentSurface,
@@ -418,7 +476,8 @@ final class PagingSurfaceController {
             iconCache: context.iconCache,
             generation: generation,
             onLaunch: context.onLaunch,
-            reason: "configure-all-current"
+            reason: "configure-all-current",
+            renderImmediately: true
         )
         configure(
             surface: nextSurface,
@@ -427,7 +486,8 @@ final class PagingSurfaceController {
             iconCache: context.iconCache,
             generation: generation,
             onLaunch: context.onLaunch,
-            reason: "configure-all-next"
+            reason: "configure-all-next",
+            renderImmediately: false
         )
         preloadFarNeighbors(iconCache: context.iconCache)
         applyTranslation(0, alignToPixel: true)
@@ -438,7 +498,7 @@ final class PagingSurfaceController {
     private func beginActiveTransition(direction: PagingDirection) {
         clearActiveTransition()
         cancelScheduledOffscreenRefresh(reason: "begin-transition")
-        cancelScheduledSnapshotPrewarm(reason: "begin-transition")
+        cancelSnapshotPrewarmQueue(reason: "begin-transition")
         transitionSessionID += 1
 
         let source = currentSurface
@@ -574,7 +634,27 @@ final class PagingSurfaceController {
         )
     }
 
-    private func scheduleSnapshotPrewarm(
+    private func markUserInteraction(reason: String) {
+        lastUserInputTime = ProcessInfo.processInfo.systemUptime
+        cancelSnapshotPrewarmQueue(reason: "interaction-\(reason)")
+    }
+
+    private func cancelSnapshotPrewarmQueue(reason: String) {
+        let pendingCount = prewarmQueue.count
+        let hadScheduledWork = scheduledSnapshotPrewarm != nil
+        scheduledSnapshotPrewarm?.cancel()
+        scheduledSnapshotPrewarm = nil
+        prewarmQueue.removeAll(keepingCapacity: true)
+        queuedPrewarmKeys.removeAll(keepingCapacity: true)
+        snapshotPrewarmToken += 1
+        if hadScheduledWork || pendingCount > 0 || isPrewarmRendering {
+            logger.notice(
+                "Snapshot prewarm canceled reason=\(reason, privacy: .public) token=\(self.snapshotPrewarmToken) pending=\(pendingCount) rendering=\(self.isPrewarmRendering)"
+            )
+        }
+    }
+
+    private func enqueueStartupPrewarm(
         layout: LaunchpadLayout,
         iconCache: IconCache,
         onLaunch: @escaping (AppItem) -> Void,
@@ -585,148 +665,328 @@ final class PagingSurfaceController {
             return
         }
 
-        scheduledSnapshotPrewarm?.cancel()
-        snapshotPrewarmToken += 1
-        let token = snapshotPrewarmToken
-        let workItem = DispatchWorkItem { [weak self] in
-            Task { @MainActor [weak self] in
-                self?.performSnapshotPrewarm(
-                    token: token,
+        insertRenderedSnapshotIfPossible(surface: previousSurface, layout: layout, iconCache: iconCache, reason: "prewarm-existing-previous")
+        insertRenderedSnapshotIfPossible(surface: currentSurface, layout: layout, iconCache: iconCache, reason: "prewarm-existing-current")
+        insertRenderedSnapshotIfPossible(surface: nextSurface, layout: layout, iconCache: iconCache, reason: "prewarm-existing-next")
+
+        if pages.indices.contains(currentPage + 1) {
+            enqueueSnapshotPrewarm(
+                pageIndex: currentPage + 1,
+                restorePageIndex: nil,
+                role: "next",
+                priority: .adjacentPrimary,
+                layout: layout,
+                iconCache: iconCache,
+                onLaunch: onLaunch,
+                reason: "\(reason)-adjacent-next"
+            )
+        }
+
+        if pages.indices.contains(currentPage - 1) {
+            enqueueSnapshotPrewarm(
+                pageIndex: currentPage - 1,
+                restorePageIndex: nil,
+                role: "previous",
+                priority: .adjacentSecondary,
+                layout: layout,
+                iconCache: iconCache,
+                onLaunch: onLaunch,
+                reason: "\(reason)-adjacent-previous"
+            )
+        }
+
+        if currentPage == 0, pages.indices.contains(2) {
+            enqueueSnapshotPrewarm(
+                pageIndex: 2,
+                restorePageIndex: nil,
+                role: "previous",
+                priority: .farDirection,
+                layout: layout,
+                iconCache: iconCache,
+                onLaunch: onLaunch,
+                reason: "\(reason)-forward-spare-2"
+            )
+            if pages.indices.contains(3) {
+                enqueueSnapshotPrewarm(
+                    pageIndex: 3,
+                    restorePageIndex: 2,
+                    role: "previous",
+                    priority: .longIdle,
                     layout: layout,
                     iconCache: iconCache,
                     onLaunch: onLaunch,
-                    reason: reason
+                    reason: "\(reason)-forward-spare-3"
+                )
+            }
+        } else if currentPage == pages.count - 1, pages.indices.contains(currentPage - 2) {
+            enqueueSnapshotPrewarm(
+                pageIndex: currentPage - 2,
+                restorePageIndex: nil,
+                role: "next",
+                priority: .farDirection,
+                layout: layout,
+                iconCache: iconCache,
+                onLaunch: onLaunch,
+                reason: "\(reason)-backward-spare-2"
+            )
+            if pages.indices.contains(currentPage - 3) {
+                enqueueSnapshotPrewarm(
+                    pageIndex: currentPage - 3,
+                    restorePageIndex: currentPage - 2,
+                    role: "next",
+                    priority: .longIdle,
+                    layout: layout,
+                    iconCache: iconCache,
+                    onLaunch: onLaunch,
+                    reason: "\(reason)-backward-spare-3"
                 )
             }
         }
-        scheduledSnapshotPrewarm = workItem
-        logger.notice("Snapshot prewarm scheduled token=\(token) reason=\(reason, privacy: .public) delay=\(self.snapshotPrewarmDelay)")
-        DispatchQueue.main.asyncAfter(deadline: .now() + snapshotPrewarmDelay, execute: workItem)
+
+        scheduleNextSnapshotPrewarm(reason: reason)
     }
 
-    private func cancelScheduledSnapshotPrewarm(reason: String) {
-        guard scheduledSnapshotPrewarm != nil else {
-            return
-        }
-
-        scheduledSnapshotPrewarm?.cancel()
-        scheduledSnapshotPrewarm = nil
-        snapshotPrewarmToken += 1
-        logger.notice("Snapshot prewarm canceled reason=\(reason, privacy: .public) token=\(self.snapshotPrewarmToken)")
-    }
-
-    private func performSnapshotPrewarm(
-        token: UInt64,
+    private func enqueueSnapshotPrewarm(
+        pageIndex: Int,
+        restorePageIndex: Int?,
+        role: String,
+        priority: SnapshotPrewarmPriority,
         layout: LaunchpadLayout,
         iconCache: IconCache,
         onLaunch: @escaping (AppItem) -> Void,
         reason: String
     ) {
-        guard token == snapshotPrewarmToken else {
-            logger.notice("Snapshot prewarm ignored stale token=\(token) latest=\(self.snapshotPrewarmToken)")
+        guard pages.indices.contains(pageIndex) else {
             return
         }
 
-        scheduledSnapshotPrewarm = nil
-        guard activeTransition == nil, !isSettling else {
-            logger.notice("Snapshot prewarm canceled busy token=\(token) settling=\(self.isSettling) transition=\(self.activeTransitionDescription, privacy: .public)")
+        let surface = surface(forRole: role)
+        guard let key = makeSnapshotKey(
+            pageIndex: pageIndex,
+            apps: pageApps(for: pageIndex),
+            layout: layout,
+            surface: surface,
+            iconCache: iconCache
+        ) else {
+            logger.notice("Snapshot prewarm skipped reason=\(reason, privacy: .public) page=\(pageIndex) priority=\(priority.description, privacy: .public) cause=no-key")
             return
         }
 
-        logger.notice("Snapshot prewarm began token=\(token) reason=\(reason, privacy: .public) page=\(self.currentPage)")
-        insertRenderedSnapshotIfPossible(surface: previousSurface, layout: layout, iconCache: iconCache, reason: "prewarm-existing-previous")
-        insertRenderedSnapshotIfPossible(surface: currentSurface, layout: layout, iconCache: iconCache, reason: "prewarm-existing-current")
-        insertRenderedSnapshotIfPossible(surface: nextSurface, layout: layout, iconCache: iconCache, reason: "prewarm-existing-next")
-
-        var needsRetry = false
-        if currentPage == 0, pages.indices.contains(2) {
-            let finalPageIndex = 2
-            let pageIndexes = [2, 3].filter { pages.indices.contains($0) }
-            needsRetry = !prewarmSpareSurface(
-                previousSurface,
-                pageIndexes: pageIndexes,
-                finalPageIndex: finalPageIndex,
-                layout: layout,
-                iconCache: iconCache,
-                onLaunch: onLaunch,
-                reason: "idle-prewarm-forward-spare"
-            )
-        } else if currentPage == pages.count - 1, pages.indices.contains(currentPage - 2) {
-            let finalPageIndex = currentPage - 2
-            let pageIndexes = [currentPage - 2, currentPage - 3].filter { pages.indices.contains($0) }
-            needsRetry = !prewarmSpareSurface(
-                nextSurface,
-                pageIndexes: pageIndexes,
-                finalPageIndex: finalPageIndex,
-                layout: layout,
-                iconCache: iconCache,
-                onLaunch: onLaunch,
-                reason: "idle-prewarm-backward-spare"
-            )
+        if snapshotCache.entry(for: key) != nil {
+            logger.notice("Snapshot prewarm skipped due to cache hit reason=\(reason, privacy: .public) key=\(key.description, privacy: .public) priority=\(priority.description, privacy: .public)")
+            return
         }
-        let summary = snapshotCache.summary
-        logger.notice("Snapshot prewarm ended token=\(token) count=\(summary.count) bytes=\(summary.estimatedBytes)")
-        if needsRetry, snapshotPrewarmRetryCount < maxSnapshotPrewarmRetries {
-            snapshotPrewarmRetryCount += 1
-            scheduleSnapshotPrewarm(
-                layout: layout,
-                iconCache: iconCache,
-                onLaunch: onLaunch,
-                reason: "retry-\(snapshotPrewarmRetryCount)"
-            )
-        } else if !needsRetry {
-            snapshotPrewarmRetryCount = 0
+
+        guard queuedPrewarmKeys.insert(key).inserted else {
+            logger.notice("Snapshot prewarm skipped duplicate reason=\(reason, privacy: .public) key=\(key.description, privacy: .public) priority=\(priority.description, privacy: .public)")
+            return
+        }
+
+        let task = SnapshotPrewarmTask(
+            token: snapshotPrewarmToken,
+            controllerGeneration: controllerGeneration,
+            pageIndex: pageIndex,
+            restorePageIndex: restorePageIndex,
+            role: role,
+            key: key,
+            priority: priority,
+            scheduledAt: ProcessInfo.processInfo.systemUptime,
+            layout: layout,
+            iconCache: iconCache,
+            onLaunch: onLaunch,
+            reason: reason
+        )
+        prewarmQueue.append(task)
+        prewarmQueue.sort { lhs, rhs in
+            if lhs.priority == rhs.priority {
+                return lhs.scheduledAt < rhs.scheduledAt
+            }
+            return lhs.priority < rhs.priority
+        }
+        logger.notice(
+            "Snapshot prewarm enqueued reason=\(reason, privacy: .public) token=\(task.token) page=\(pageIndex) restore=\(restorePageIndex ?? -1) role=\(role, privacy: .public) priority=\(priority.description, privacy: .public) key=\(key.description, privacy: .public) pending=\(self.prewarmQueue.count)"
+        )
+    }
+
+    private func scheduleNextSnapshotPrewarm(reason: String) {
+        guard scheduledSnapshotPrewarm == nil else {
+            return
+        }
+
+        guard !isPrewarmRendering else {
+            logger.notice("Snapshot prewarm schedule skipped reason=\(reason, privacy: .public) cause=rendering")
+            return
+        }
+
+        guard !prewarmQueue.isEmpty else {
+            return
+        }
+
+        guard activeTransition == nil else {
+            logger.notice("Snapshot prewarm skipped due to active transition reason=\(reason, privacy: .public) transition=\(self.activeTransitionDescription, privacy: .public)")
+            return
+        }
+
+        guard !isSettling else {
+            logger.notice("Snapshot prewarm skipped due to settle reason=\(reason, privacy: .public)")
+            return
+        }
+
+        let next = prewarmQueue[0]
+        let now = ProcessInfo.processInfo.systemUptime
+        let priorityIdleWindow = idleWindow(for: next.priority)
+        let idleDelay = max(0, priorityIdleWindow - (now - lastUserInputTime))
+        let shortGapDelay = max(0, prewarmMinimumGap - (now - lastPrewarmEndTime))
+        let longRenderDelay = lastPrewarmDuration > 0.05
+            ? max(0, prewarmLongRenderGap - (now - lastPrewarmEndTime))
+            : 0
+        let delay = max(idleDelay, shortGapDelay, longRenderDelay)
+        let token = snapshotPrewarmToken
+        let idleMs = (now - lastUserInputTime) * 1000
+        let gapMs = (now - lastPrewarmEndTime) * 1000
+        let workItem = DispatchWorkItem { [weak self] in
+            Task { @MainActor [weak self] in
+                self?.performNextSnapshotPrewarm(token: token)
+            }
+        }
+        scheduledSnapshotPrewarm = workItem
+        logger.notice(
+            "Snapshot prewarm scheduled token=\(token) reason=\(reason, privacy: .public) page=\(next.pageIndex) role=\(next.role, privacy: .public) priority=\(next.priority.description, privacy: .public) delay=\(delay, format: .fixed(precision: 3)) idleMs=\(idleMs, format: .fixed(precision: 1)) gapMs=\(gapMs, format: .fixed(precision: 1)) pending=\(self.prewarmQueue.count)"
+        )
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
+    }
+
+    private func idleWindow(for priority: SnapshotPrewarmPriority) -> TimeInterval {
+        switch priority {
+        case .adjacentPrimary:
+            prewarmIdleWindow
+        case .adjacentSecondary:
+            0.35
+        case .farDirection:
+            2.50
+        case .longIdle:
+            8.00
         }
     }
 
-    @discardableResult
-    private func prewarmSpareSurface(
-        _ surface: PageSurfaceView,
-        pageIndexes: [Int],
-        finalPageIndex: Int,
-        layout: LaunchpadLayout,
-        iconCache: IconCache,
-        onLaunch: @escaping (AppItem) -> Void,
-        reason: String
-    ) -> Bool {
-        var allPagesCached = true
-        for pageIndex in pageIndexes {
-            configure(
-                surface: surface,
-                pageIndex: pageIndex,
-                layout: layout,
-                iconCache: iconCache,
-                generation: cache.nextGeneration(),
-                onLaunch: onLaunch,
-                reason: "\(reason)-page-\(pageIndex)"
+    private func performNextSnapshotPrewarm(token: UInt64) {
+        scheduledSnapshotPrewarm = nil
+        guard token == snapshotPrewarmToken else {
+            logger.notice("Snapshot prewarm invalidated by generation token=\(token) latest=\(self.snapshotPrewarmToken)")
+            return
+        }
+
+        guard !isPrewarmRendering else {
+            logger.notice("Snapshot prewarm skipped reason=already-rendering token=\(token)")
+            return
+        }
+
+        guard activeTransition == nil else {
+            logger.notice("Snapshot prewarm skipped due to active transition token=\(token) transition=\(self.activeTransitionDescription, privacy: .public)")
+            return
+        }
+
+        guard !isSettling else {
+            logger.notice("Snapshot prewarm skipped due to settle token=\(token)")
+            return
+        }
+
+        guard !prewarmQueue.isEmpty else {
+            return
+        }
+
+        let next = prewarmQueue[0]
+        let now = ProcessInfo.processInfo.systemUptime
+        let idleInterval = now - lastUserInputTime
+        let requiredIdleWindow = idleWindow(for: next.priority)
+        guard idleInterval >= requiredIdleWindow else {
+            logger.notice(
+                "Snapshot prewarm skipped due to interaction token=\(token) idleMs=\(idleInterval * 1000, format: .fixed(precision: 1)) requiredMs=\(requiredIdleWindow * 1000, format: .fixed(precision: 1))"
             )
-            allPagesCached = isSnapshotCached(
-                pageIndex: pageIndex,
-                surface: surface,
-                layout: layout,
-                iconCache: iconCache
-            ) && allPagesCached
+            scheduleNextSnapshotPrewarm(reason: "idle-window-not-met")
+            return
         }
 
-        guard surface.pageIndex != finalPageIndex else {
-            return allPagesCached
+        let task = prewarmQueue.removeFirst()
+        queuedPrewarmKeys.remove(task.key)
+        guard task.controllerGeneration == controllerGeneration else {
+            logger.notice(
+                "Snapshot prewarm invalidated by generation token=\(token) taskGeneration=\(task.controllerGeneration) currentGeneration=\(self.controllerGeneration) page=\(task.pageIndex)"
+            )
+            scheduleNextSnapshotPrewarm(reason: "after-generation-skip")
+            return
         }
 
+        guard pages.indices.contains(task.pageIndex) else {
+            logger.notice("Snapshot prewarm canceled page-out-of-range token=\(token) page=\(task.pageIndex)")
+            scheduleNextSnapshotPrewarm(reason: "after-range-skip")
+            return
+        }
+
+        if snapshotCache.entry(for: task.key) != nil {
+            logger.notice("Snapshot prewarm skipped due to cache hit token=\(token) key=\(task.key.description, privacy: .public) page=\(task.pageIndex)")
+            scheduleNextSnapshotPrewarm(reason: "after-cache-hit-skip")
+            return
+        }
+
+        let surface = surface(forRole: task.role)
+        guard !surface.isPagingLocked,
+              activeTransition?.contains(surface) != true,
+              canRefreshOffscreen(surface: surface, expectedRole: task.role) else {
+            logger.notice(
+                "Snapshot prewarm skipped due to unsafe surface token=\(token) page=\(task.pageIndex) role=\(task.role, privacy: .public) state=\(self.surfaceState(surface), privacy: .public) transition=\(self.activeTransitionDescription, privacy: .public)"
+            )
+            scheduleNextSnapshotPrewarm(reason: "after-unsafe-surface")
+            return
+        }
+
+        isPrewarmRendering = true
+        let renderStart = ContinuousClock.now
+        let inputGapMs = (ProcessInfo.processInfo.systemUptime - lastUserInputTime) * 1000
+        logger.notice(
+            "Snapshot prewarm started token=\(token) page=\(task.pageIndex) role=\(task.role, privacy: .public) priority=\(task.priority.description, privacy: .public) reason=\(task.reason, privacy: .public) inputGapMs=\(inputGapMs, format: .fixed(precision: 1))"
+        )
         configure(
             surface: surface,
-            pageIndex: finalPageIndex,
-            layout: layout,
-            iconCache: iconCache,
+            pageIndex: task.pageIndex,
+            layout: task.layout,
+            iconCache: task.iconCache,
             generation: cache.nextGeneration(),
-            onLaunch: onLaunch,
-            reason: "\(reason)-restore-\(finalPageIndex)"
+            onLaunch: task.onLaunch,
+            reason: "idle-prewarm-\(task.priority.description)-page-\(task.pageIndex)",
+            renderImmediately: true
         )
-        return isSnapshotCached(
-            pageIndex: finalPageIndex,
-            surface: surface,
-            layout: layout,
-            iconCache: iconCache
-        ) && allPagesCached
+        let renderMs = milliseconds(renderStart.duration(to: .now))
+        lastPrewarmDuration = renderMs / 1000
+        lastPrewarmEndTime = ProcessInfo.processInfo.systemUptime
+
+        if let restorePageIndex = task.restorePageIndex,
+           surface.pageIndex != restorePageIndex,
+           pages.indices.contains(restorePageIndex) {
+            logger.notice(
+                "Snapshot prewarm restoring surface token=\(token) role=\(task.role, privacy: .public) restorePage=\(restorePageIndex)"
+            )
+            configure(
+                surface: surface,
+                pageIndex: restorePageIndex,
+                layout: task.layout,
+                iconCache: task.iconCache,
+                generation: cache.nextGeneration(),
+                onLaunch: task.onLaunch,
+                reason: "idle-prewarm-restore-\(restorePageIndex)",
+                renderImmediately: false
+            )
+        }
+
+        isPrewarmRendering = false
+        let summary = snapshotCache.summary
+        logger.notice(
+            "Snapshot prewarm completed token=\(token) page=\(task.pageIndex) role=\(task.role, privacy: .public) renderMs=\(renderMs, format: .fixed(precision: 2)) count=\(summary.count) bytes=\(summary.estimatedBytes) pending=\(self.prewarmQueue.count)"
+        )
+        if renderMs > 16 {
+            logger.notice("Snapshot prewarm frame-budget exceeded token=\(token) page=\(task.pageIndex) renderMs=\(renderMs, format: .fixed(precision: 2))")
+        }
+        scheduleNextSnapshotPrewarm(reason: "after-complete")
     }
 
     private func performScheduledOffscreenRefresh(_ request: OffscreenRefreshRequest) {
@@ -788,7 +1048,8 @@ final class PagingSurfaceController {
         iconCache: IconCache,
         generation: Int,
         onLaunch: @escaping (AppItem) -> Void,
-        reason: String
+        reason: String,
+        renderImmediately: Bool = true
     ) {
         if surface.isPagingLocked || activeTransition?.contains(surface) == true {
             logger.fault(
@@ -848,7 +1109,13 @@ final class PagingSurfaceController {
             onLaunch: onLaunch,
             deferRender: true
         )
+        guard renderImmediately else {
+            logger.notice("Snapshot render deferred reason=\(reason, privacy: .public) page=\(pageIndex)")
+            return
+        }
+
         let renderStart = ContinuousClock.now
+        logger.notice("Snapshot render started reason=\(reason, privacy: .public) page=\(pageIndex)")
         let snapshot = surface.forceRenderIfNeeded()
         let elapsed = milliseconds(renderStart.duration(to: .now))
         logger.notice(
@@ -1179,6 +1446,9 @@ final class PagingSurfaceController {
         driver.start()
         if let offscreenRefresh {
             scheduleOffscreenRefresh(offscreenRefresh)
+        }
+        if let layout, let iconCache, let onLaunch {
+            enqueueStartupPrewarm(layout: layout, iconCache: iconCache, onLaunch: onLaunch, reason: "settle-complete")
         }
         exportMotionCSVIfNeeded()
         logger.notice("Surface settle complete page=\(self.currentPage) surfaceCount=\(self.transitionView.subviews.count)")

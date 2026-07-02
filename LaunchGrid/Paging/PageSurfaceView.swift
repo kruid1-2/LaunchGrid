@@ -20,6 +20,7 @@ final class PageSurfaceView: NSView {
     private var renderedGeneration = Int.min
     private var isRenderingSurfaceCache = false
     private var debugOverlayText: String?
+    private var renderDeferred = false
     var onCacheableSnapshotRendered: ((PageSurfaceView, PageSurfaceSnapshot) -> Void)?
 
     private let labelParagraphStyle: NSParagraphStyle = {
@@ -86,6 +87,8 @@ final class PageSurfaceView: NSView {
         let validPaths = Set(apps.map(\.normalizedPath))
         iconImages = iconImages.filter { validPaths.contains($0.key) }
 
+        renderDeferred = deferRender && cachedSnapshot == nil
+
         if let cachedSnapshot {
             applyCachedSnapshot(cachedSnapshot)
             return
@@ -151,7 +154,10 @@ final class PageSurfaceView: NSView {
         isPagingLocked = locked
         if !locked, surfaceRefreshNeeded {
             DispatchQueue.main.async { [weak self] in
-                guard let self, !self.isPagingLocked, self.surfaceRefreshNeeded else {
+                guard let self,
+                      !self.isPagingLocked,
+                      !self.renderDeferred,
+                      self.surfaceRefreshNeeded else {
                     return
                 }
 
@@ -226,6 +232,7 @@ final class PageSurfaceView: NSView {
 
     @discardableResult
     func forceRenderIfNeeded() -> PageSurfaceSnapshot? {
+        renderDeferred = false
         guard surfaceRefreshNeeded || renderedGeneration != generation || contentLayer.contents == nil else {
             return renderedSnapshotIfCacheable()
         }
@@ -547,6 +554,9 @@ final class PageSurfaceView: NSView {
         guard window != nil else {
             return
         }
+        guard !renderDeferred else {
+            return
+        }
 
         forceRenderIfNeeded()
     }
@@ -572,6 +582,7 @@ final class PageSurfaceView: NSView {
     }
 
     private func applyCachedSnapshot(_ snapshot: PageSurfaceSnapshot) {
+        renderDeferred = false
         contentLayer.frame = bounds
         contentLayer.contents = snapshot.image
         contentLayer.contentsScale = snapshot.scale
