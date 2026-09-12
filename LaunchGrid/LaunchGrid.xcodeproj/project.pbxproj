@@ -31,6 +31,7 @@
 		000000000000000000000123 /* PageSurfaceView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000024 /* PageSurfaceView.swift */; };
 		000000000000000000000124 /* PageSurfaceCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000025 /* PageSurfaceCache.swift */; };
 		000000000000000000000125 /* PagingGestureDriver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000026 /* PagingGestureDriver.swift */; };
+		000000000000000000000126 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000027 /* Assets.xcassets */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -59,6 +60,9 @@
 		000000000000000000000024 /* PageSurfaceView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PageSurfaceView.swift; sourceTree = "<group>"; };
 		000000000000000000000025 /* PageSurfaceCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PageSurfaceCache.swift; sourceTree = "<group>"; };
 		000000000000000000000026 /* PagingGestureDriver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PagingGestureDriver.swift; sourceTree = "<group>"; };
+		000000000000000000000027 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		000000000000000000000028 /* AppIconSource.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = AppIconSource.png; sourceTree = "<group>"; };
+		000000000000000000000029 /* LaunchGrid.icns */ = {isa = PBXFileReference; lastKnownFileType = image.icns; path = LaunchGrid.icns; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -84,6 +88,7 @@
 				000000000000000000000309 /* Paging */,
 				000000000000000000000306 /* Views */,
 				000000000000000000000308 /* Design */,
+				000000000000000000000310 /* Resources */,
 				000000000000000000000307 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -167,6 +172,16 @@
 			path = Paging;
 			sourceTree = "<group>";
 		};
+		000000000000000000000310 /* Resources */ = {
+			isa = PBXGroup;
+			children = (
+				000000000000000000000027 /* Assets.xcassets */,
+				000000000000000000000028 /* AppIconSource.png */,
+				000000000000000000000029 /* LaunchGrid.icns */,
+			);
+			path = Resources;
+			sourceTree = "<group>";
+		};
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
@@ -225,6 +240,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				000000000000000000000126 /* Assets.xcassets in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

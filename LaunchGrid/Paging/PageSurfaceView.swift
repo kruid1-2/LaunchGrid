@@ -20,6 +20,8 @@ final class PageSurfaceView: NSView {
     private var renderedGeneration = Int.min
     private var isRenderingSurfaceCache = false
     private var debugOverlayText: String?
+    private var renderDeferred = false
+    var onCacheableSnapshotRendered: ((PageSurfaceView, PageSurfaceSnapshot) -> Void)?
 
     private let labelParagraphStyle: NSParagraphStyle = {
         let paragraphStyle = NSMutableParagraphStyle()
@@ -66,7 +68,9 @@ final class PageSurfaceView: NSView {
         layout: LaunchpadLayout,
         iconCache: IconCache,
         generation: Int,
-        onLaunch: @escaping (AppItem) -> Void
+        onLaunch: @escaping (AppItem) -> Void,
+        cachedSnapshot: PageSurfaceSnapshot? = nil,
+        deferRender: Bool = false
     ) {
         self.pageIndex = pageIndex
         self.apps = apps
@@ -82,8 +86,21 @@ final class PageSurfaceView: NSView {
 
         let validPaths = Set(apps.map(\.normalizedPath))
         iconImages = iconImages.filter { validPaths.contains($0.key) }
+
+        renderDeferred = deferRender && cachedSnapshot == nil
+
+        if let cachedSnapshot {
+            applyCachedSnapshot(cachedSnapshot)
+            return
+        }
+
         requestMissingIcons(iconCache: iconCache, generation: generation)
-        markNeedsSurfaceRefresh()
+        if deferRender {
+            surfaceRefreshNeeded = true
+            needsDisplay = true
+        } else {
+            markNeedsSurfaceRefresh()
+        }
     }
 
     var hasDrawableContent: Bool {
@@ -92,6 +109,27 @@ final class PageSurfaceView: NSView {
 
     var hasRenderedCurrentGeneration: Bool {
         renderedGeneration == generation
+    }
+
+    var hasCacheableSnapshot: Bool {
+        renderedGeneration == generation
+            && currentContentImage != nil
+            && allIconsAvailable
+            && debugOverlayText == nil
+    }
+
+    func renderedSnapshotIfCacheable() -> PageSurfaceSnapshot? {
+        guard hasCacheableSnapshot,
+              let image = currentContentImage else {
+            return nil
+        }
+
+        return PageSurfaceSnapshot(
+            image: image,
+            pointSize: bounds.size,
+            pixelSize: CGSize(width: image.width, height: image.height),
+            scale: contentLayer.contentsScale
+        )
     }
 
     func setDebugBorder(_ color: NSColor?) {
@@ -116,7 +154,10 @@ final class PageSurfaceView: NSView {
         isPagingLocked = locked
         if !locked, surfaceRefreshNeeded {
             DispatchQueue.main.async { [weak self] in
-                guard let self, !self.isPagingLocked, self.surfaceRefreshNeeded else {
+                guard let self,
+                      !self.isPagingLocked,
+                      !self.renderDeferred,
+                      self.surfaceRefreshNeeded else {
                     return
                 }
 
@@ -189,15 +230,17 @@ final class PageSurfaceView: NSView {
         renderedGeneration = generation
     }
 
-    func forceRenderIfNeeded() {
+    @discardableResult
+    func forceRenderIfNeeded() -> PageSurfaceSnapshot? {
+        renderDeferred = false
         guard surfaceRefreshNeeded || renderedGeneration != generation || contentLayer.contents == nil else {
-            return
+            return renderedSnapshotIfCacheable()
         }
 
         guard !isPagingLocked else {
             needsDisplay = true
             surfaceRefreshNeeded = true
-            return
+            return nil
         }
 
         layoutSubtreeIfNeeded()
@@ -205,7 +248,7 @@ final class PageSurfaceView: NSView {
         guard bounds.width > 1, bounds.height > 1 else {
             displayIfNeeded()
             layer?.displayIfNeeded()
-            return
+            return nil
         }
 
         let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
@@ -224,7 +267,7 @@ final class PageSurfaceView: NSView {
               ) else {
             displayIfNeeded()
             layer?.displayIfNeeded()
-            return
+            return nil
         }
 
         bitmapContext.translateBy(x: 0, y: CGFloat(pixelHeight))
@@ -241,6 +284,11 @@ final class PageSurfaceView: NSView {
         renderedGeneration = generation
         surfaceRefreshNeeded = false
         needsDisplay = false
+        let snapshot = renderedSnapshotIfCacheable()
+        if let snapshot {
+            onCacheableSnapshotRendered?(self, snapshot)
+        }
+        return snapshot
     }
 
     override func mouseMoved(with event: NSEvent) {
@@ -506,8 +554,41 @@ final class PageSurfaceView: NSView {
         guard window != nil else {
             return
         }
+        guard !renderDeferred else {
+            return
+        }
 
         forceRenderIfNeeded()
+    }
+
+    private var allIconsAvailable: Bool {
+        guard let iconCache else {
+            return apps.isEmpty
+        }
+
+        return apps.allSatisfy { app in
+            iconImages[app.normalizedPath] != nil
+                || iconCache.cachedIcon(forPath: app.normalizedPath) != nil
+            }
+    }
+
+    private var currentContentImage: CGImage? {
+        guard let contents = contentLayer.contents,
+              CFGetTypeID(contents as CFTypeRef) == CGImage.typeID else {
+            return nil
+        }
+
+        return (contents as! CGImage)
+    }
+
+    private func applyCachedSnapshot(_ snapshot: PageSurfaceSnapshot) {
+        renderDeferred = false
+        contentLayer.frame = bounds
+        contentLayer.contents = snapshot.image
+        contentLayer.contentsScale = snapshot.scale
+        renderedGeneration = generation
+        surfaceRefreshNeeded = false
+        needsDisplay = false
     }
 
     private func hitIndex(at point: CGPoint) -> Int? {
