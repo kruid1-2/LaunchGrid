@@ -1,4 +1,4 @@
-// swift-tools-version: 5.9
+// swift-tools-version: 6.2
 
 import PackageDescription
 
@@ -16,10 +16,10 @@ let package = Package(
             path: ".",
             exclude: [
                 "Package.swift",
-                ".codex",
-                ".build",
-                "DerivedData",
-                "dist",
+                "AGENTS.md",
+                "PATCH_NOTES.md",
+                "PATCH_NOTES_AE27476.md",
+                "Resources",
                 "script"
             ],
             sources: [
@@ -33,14 +33,23 @@ let package = Package(
                 "ViewModels/PagerViewModel.swift",
                 "Window/LauncherPanel.swift",
                 "Window/LauncherWindowController.swift",
+                "Window/LauncherRootHostingView.swift",
                 "Window/PagingEventView.swift",
                 "Design/LaunchpadMetrics.swift",
+                "Paging/PageSurfaceCache.swift",
+                "Paging/PageSurfaceView.swift",
+                "Paging/PagingGestureDriver.swift",
+                "Paging/PagingSurfaceController.swift",
                 "Views/LauncherView.swift",
                 "Views/AppGridView.swift",
+                "Views/AppPageHostingView.swift",
                 "Views/AppPageView.swift",
                 "Views/AppIconView.swift",
                 "Views/PageIndicatorView.swift",
                 "Views/SearchBarView.swift"
+            ],
+            swiftSettings: [
+                .swiftLanguageMode(.v5)
             ]
         )
     ]

@@ -155,6 +155,10 @@ LaunchGrid 当前没有：
 - 全局快捷键、登录项、菜单栏入口和设置窗口尚未实现
 - 当前需要通过 Dock 图标重新显示隐藏后的启动器
 - 视觉目标是经典 Launchpad，但没有声明与系统 Launchpad 像素级完全一致
-- Xcode 工程与 `Package.swift` 的 Deployment Target 尚未统一
-- Xcode 工程是当前完整构建入口；SwiftPM 清单尚未作为最新分页实现的发布入口验证
+- Xcode 工程使用 macOS 13 Deployment Target；SwiftPM 清单面向 macOS 26
+- Xcode 工程是推荐的应用包构建入口；SwiftPM 清单可用于源码编译验证
 - GUI 流畅度和输入设备差异仍需要实机人工验证
+
+## 许可证
+
+本项目采用 [MIT License](LICENSE)。
